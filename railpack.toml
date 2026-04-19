@@ -1,0 +1,2 @@
+[deploy]
+start_command = "gunicorn hls_player:app"
