@@ -1,5 +1,5 @@
 {
   "deploy": {
-    "startCommand": "gunicorn hls_player:app"
+    "startCommand": "gunicorn app:app"
   }
 }
