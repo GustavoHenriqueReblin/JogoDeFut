@@ -8,18 +8,20 @@ def install(pkg):
                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 try:
-    from flask import Flask, render_template_string
+    from flask import Flask, render_template_string, request
     from flask_cors import CORS
 except ImportError:
     print("Instalando dependências...")
     install("flask")
     install("flask-cors")
-    from flask import Flask, render_template_string
+    from flask import Flask, render_template_string, request
     from flask_cors import CORS
 
 app = Flask(__name__)
 CORS(app)
 PORT = int(os.environ.get('PORT', 5000))
+DEFAULT_URL = os.environ.get('START_URL', '')
+current_url = DEFAULT_URL
 
 HTML = """<!DOCTYPE html>
 <html lang="pt-BR">
@@ -156,9 +158,29 @@ let URL_M3U8 = {{ url|tojson }};
 const video = document.getElementById("v");
 const overlay = document.getElementById("buf-overlay");
 const bufMsg = document.getElementById("buf-msg");
+const inputElement = document.getElementById('url-input');
 let retries = 0;
 let hls;
 let fullscreenDone = false;
+
+if(URL_M3U8){
+  inputElement.value = URL_M3U8;
+  document.getElementById('url-display').textContent = URL_M3U8;
+  document.getElementById('url-display').title = URL_M3U8;
+}
+
+// Polling para verificar mudanças na URL e forçar refresh
+setInterval(() => {
+  fetch('/current_url')
+    .then(r => r.text())
+    .then(url => {
+      if(url !== URL_M3U8 && url.trim()){
+        log("URL mudou — recarregando página","inf");
+        location.reload();
+      }
+    })
+    .catch(err => console.log('Erro no polling:', err));
+}, 5000);
 
 function log(msg, t=""){
   const d=document.getElementById("log"), l=document.createElement("div");
@@ -348,7 +370,31 @@ if(URL_M3U8 && Hls.isSupported()){
 
 @app.route("/")
 def index():
-    return render_template_string(HTML, url="")
+    url = request.args.get('url', current_url)
+    return render_template_string(HTML, url=url)
+
+@app.route("/current_url")
+def get_current_url():
+    return current_url
+
+@app.route("/admin", methods=["GET", "POST"])
+def admin():
+    global current_url
+    if request.method == "POST":
+        new_url = request.form.get("url", "").strip()
+        current_url = new_url
+        return f"URL atualizada para: {new_url}"
+    return '''
+    <form method="post">
+        <label>URL do Stream:</label><br>
+        <input type="text" name="url" value="''' + current_url + '''" style="width:100%"><br><br>
+        <button type="submit">Atualizar</button>
+    </form>
+    '''
 
 if __name__ == "__main__":
+    print(f"App is running on port {PORT}. Access via the Railway URL assigned to your project.")
+    if DEFAULT_URL:
+        print(f"Default stream URL from START_URL={DEFAULT_URL}")
+    print(f"Current URL: {current_url}")
     app.run(host="0.0.0.0", port=PORT, debug=False)
