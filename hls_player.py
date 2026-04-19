@@ -28,6 +28,9 @@ HTML = """<!DOCTYPE html>
 <head>
   <meta charset="UTF-8"/>
   <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <meta name="theme-color" content="#e8ff47"/>
+  <meta name="description" content="Player de vídeo HLS simples"/>
+  <link rel="manifest" href="/manifest.json"/>
   <title>HLS Player</title>
   <script src="https://cdn.jsdelivr.net/npm/hls.js@latest"></script>
   <style>
@@ -182,6 +185,13 @@ setInterval(() => {
     .catch(err => console.log('Erro no polling:', err));
 }, 5000);
 
+// Registrar Service Worker para PWA
+if('serviceWorker' in navigator){
+  navigator.serviceWorker.register('/sw.js')
+    .then(reg => console.log('SW registrado'))
+    .catch(err => console.log('Erro SW:', err));
+}
+
 function log(msg, t=""){
   const d=document.getElementById("log"), l=document.createElement("div");
   l.className="ll "+t;
@@ -269,10 +279,11 @@ function initHls(){
     document.getElementById("q-select").value = d.level;
   });
 
-  // Assim que o vídeo começa a tocar de verdade → fullscreen
+  // Assim que o vídeo começa a tocar de verdade → fullscreen e desmutar
   video.addEventListener("playing", ()=>{
     hideBuf();
     st("ss","▶ reproduzindo");
+    video.muted = false;  // Garantir desmute
     tryFullscreen();
   }, { once: false });
 
@@ -377,19 +388,83 @@ def index():
 def get_current_url():
     return current_url
 
+@app.route("/manifest.json")
+def manifest():
+    return app.send_static_file('manifest.json')
+
+@app.route("/sw.js")
+def sw():
+    return app.send_static_file('sw.js')
+
 @app.route("/admin", methods=["GET", "POST"])
 def admin():
     global current_url
+    message = ""
     if request.method == "POST":
         new_url = request.form.get("url", "").strip()
         current_url = new_url
-        return f"URL atualizada para: {new_url}"
-    return '''
-    <form method="post">
-        <label>URL do Stream:</label><br>
-        <input type="text" name="url" value="''' + current_url + '''" style="width:100%"><br><br>
-        <button type="submit">Atualizar</button>
+        message = f"URL atualizada com sucesso para: {new_url}"
+    return f'''
+    <!DOCTYPE html>
+    <html lang="pt-BR">
+    <head>
+      <meta charset="UTF-8"/>
+      <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+      <title>Admin - HLS Player</title>
+      <style>
+        @import url('https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=Syne:wght@700;800&display=swap');
+        *,*::before,*::after{{box-sizing:border-box;margin:0;padding:0}}
+        :root{{
+          --bg:#0a0a0f;--surface:#111118;--border:#1e1e2e;
+          --accent:#e8ff47;--accent2:#47ffe8;--text:#e8e8f0;
+          --muted:#555570;--error:#ff4757;--warn:#ffaa00;
+        }}
+        body{{
+          background:var(--bg);color:var(--text);font-family:'Syne',sans-serif;
+          min-height:100vh;display:flex;flex-direction:column;
+          align-items:center;padding:40px 20px;gap:24px;
+        }}
+        body::before{{
+          content:'';position:fixed;inset:0;
+          background-image:linear-gradient(var(--border) 1px,transparent 1px),linear-gradient(90deg,var(--border) 1px,transparent 1px);
+          background-size:48px 48px;opacity:.25;pointer-events:none;z-index:0;
+        }}
+        header{{position:relative;z-index:1;text-align:center}}
+        header h1{{font-size:1.8rem;font-weight:800;letter-spacing:-.03em;color:var(--accent)}}
+        .admin-form{{
+          position:relative;z-index:1;width:100%;max-width:600px;
+          background:var(--surface);border:1px solid var(--border);
+          border-radius:8px;padding:20px;display:flex;flex-direction:column;gap:16px;
+        }}
+        .admin-form label{{font-family:'DM Mono',monospace;font-size:.78rem;color:var(--muted);text-transform:uppercase;letter-spacing:.1em}}
+        .admin-form input{{
+          background:var(--bg);border:1px solid var(--border);color:var(--text);
+          font-family:'DM Mono',monospace;font-size:.78rem;
+          border-radius:6px;padding:12px;outline:none;width:100%;
+        }}
+        .admin-form button{{
+          background:var(--accent);border:none;color:#000;
+          font-family:'DM Mono',monospace;font-size:.78rem;font-weight:500;
+          border-radius:6px;padding:12px;cursor:pointer;transition:all .15s;
+        }}
+        .admin-form button:hover{{background:#d4ff3f}}
+        .message{{font-family:'DM Mono',monospace;font-size:.72rem;color:var(--accent2);text-align:center;padding:10px 0}}
+        .current{{font-family:'DM Mono',monospace;font-size:.62rem;color:var(--muted);margin-top:8px}}
+      </style>
+    </head>
+    <body>
+    <header>
+      <h1>ADMIN - HLS PLAYER</h1>
+    </header>
+    <form class="admin-form" method="post">
+      <label>URL DO STREAM ATUAL</label>
+      <input type="text" name="url" value="{current_url}" placeholder="Cole a URL .m3u8 aqui">
+      <div class="current">Atual: {current_url or 'Nenhuma'}</div>
+      <button type="submit">ATUALIZAR URL</button>
+      {f'<div class="message">{message}</div>' if message else ''}
     </form>
+    </body>
+    </html>
     '''
 
 if __name__ == "__main__":

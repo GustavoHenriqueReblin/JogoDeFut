@@ -1,0 +1,16 @@
+{
+  "name": "HLS Player",
+  "short_name": "HLS Player",
+  "description": "Player de vídeo HLS simples",
+  "start_url": "/",
+  "display": "fullscreen",
+  "background_color": "#0a0a0f",
+  "theme_color": "#e8ff47",
+  "icons": [
+    {
+      "src": "data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><rect width='100' height='100' fill='%230a0a0f'/><text y='50%' font-size='50' fill='%23e8ff47' text-anchor='middle' dy='.35em'>▶</text></svg>",
+      "sizes": "192x192",
+      "type": "image/svg+xml"
+    }
+  ]
+}
