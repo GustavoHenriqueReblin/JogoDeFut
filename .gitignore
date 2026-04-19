@@ -13,3 +13,4 @@ htmlcov/
 
 instance/
 *.log
+domains.txt

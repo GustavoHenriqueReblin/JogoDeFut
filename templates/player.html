@@ -10,7 +10,7 @@
   <link rel="icon" type="image/png" sizes="192x192" href="/static/icons/logo-192.png"/>
   <link rel="shortcut icon" href="/favicon.ico"/>
   <link rel="apple-touch-icon" href="/static/icons/logo-192.png"/>
-  <title>HLS Player</title>
+  <title>Gol AO VIVO TV</title>
   <script src="https://cdn.jsdelivr.net/npm/hls.js@latest"></script>
   <style>
     @import url('https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=Syne:wght@700;800&display=swap');
@@ -66,12 +66,19 @@
     #buf-overlay{
       position:absolute;inset:0;display:none;
       align-items:center;justify-content:center;
-      background:rgba(0,0,0,.55);z-index:10;flex-direction:column;gap:10px;
+      background:rgba(0,0,0,.85);z-index:10;flex-direction:column;gap:10px;
     }
     #buf-overlay.show{display:flex}
     .spinner{width:36px;height:36px;border:3px solid #333;border-top-color:var(--accent);border-radius:50%;animation:spin .7s linear infinite}
     @keyframes spin{to{transform:rotate(360deg)}}
     #buf-msg{font-family:'DM Mono',monospace;font-size:.75rem;color:var(--muted)}
+    #start-overlay{
+      position:absolute;inset:0;z-index:11;
+      background:rgba(0,0,0,.72);
+      backdrop-filter:blur(2px);-webkit-backdrop-filter:blur(2px);
+      transition:opacity .3s;
+    }
+    #start-overlay.hidden{opacity:0;pointer-events:none}
     .sound-btn{
       position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);z-index:12;
       background:var(--accent);border:none;color:#000;
@@ -114,11 +121,26 @@
     .ll.ok{color:var(--accent)} .ll.err{color:var(--error)} .ll.inf{color:var(--accent2)} .ll.warn{color:var(--warn)}
     @keyframes fi{from{opacity:0;transform:translateY(3px)}to{opacity:1}}
     ::-webkit-scrollbar{width:4px} ::-webkit-scrollbar-thumb{background:var(--border);border-radius:4px}
+    .channels{
+      position:relative;z-index:1;width:100%;max-width:900px;
+      background:var(--surface);border:1px solid var(--border);
+      border-radius:10px;padding:14px 16px;display:flex;flex-direction:column;gap:10px;
+    }
+    .channels-title{font-family:'DM Mono',monospace;font-size:.62rem;color:var(--muted);letter-spacing:.1em;text-transform:uppercase}
+    .channels-list{display:flex;flex-wrap:wrap;gap:8px}
+    .ch-btn{
+      background:transparent;border:1px solid var(--border);color:var(--text);
+      font-family:'DM Mono',monospace;font-size:.78rem;font-weight:500;
+      border-radius:6px;padding:7px 14px;cursor:pointer;transition:all .15s;
+    }
+    .ch-btn:hover{border-color:var(--accent);color:var(--accent)}
+    .ch-btn.active{border-color:var(--accent);color:#000;background:var(--accent)}
+    .ch-empty{font-family:'DM Mono',monospace;font-size:.72rem;color:var(--muted)}
   </style>
 </head>
 <body class="{{ 'show-log' if show_log else 'compact' }}">
 <header>
-  <h1>▶ HLS PLAYER</h1>
+  <h1>⚽ GOL AO VIVO TV</h1>
   <div class="url-badge" id="url-display"></div>
 </header>
 
@@ -129,6 +151,7 @@
 
 <div class="video-wrap">
   <video id="v" controls autoplay muted playsinline></video>
+  <div id="start-overlay" class="hidden"></div>
   <button class="sound-btn" id="sound-btn" type="button" onclick="startWatching()">ASSISTIR EM TELA CHEIA</button>
   <div id="buf-overlay">
     <div class="spinner"></div>
@@ -151,10 +174,18 @@
   <button class="q-btn install-btn" id="install-btn" type="button">INSTALAR</button>
 </div>
 
+<div class="channels" id="channels-wrap">
+  <div class="channels-title">Canais disponíveis</div>
+  <div class="channels-list" id="channels-list">
+    <span class="ch-empty">Verificando canais...</span>
+  </div>
+</div>
+
 <div class="log" id="log"></div>
 
 <script>
 let URL_M3U8 = {{ url|tojson }};
+let activeChannel = null;
 const video = document.getElementById("v");
 video.muted = true;
 video.defaultMuted = true;
@@ -175,6 +206,7 @@ if(URL_M3U8){
 }
 
 setInterval(() => {
+  if(activeChannel !== null) return; // usuário escolheu um canal, não sobrescrever
   fetch('/current_url')
     .then(r => r.text())
     .then(url => {
@@ -221,9 +253,11 @@ function showBuf(msg){ overlay.classList.add("show"); bufMsg.textContent=msg||"r
 function hideBuf(){ overlay.classList.remove("show") }
 function showSoundButton(){
   document.getElementById("sound-btn").classList.remove("hidden");
+  document.getElementById("start-overlay").classList.remove("hidden");
 }
 function hideSoundButton(){
   document.getElementById("sound-btn").classList.add("hidden");
+  document.getElementById("start-overlay").classList.add("hidden");
 }
 function updateUrlDisplay(url){
   inputElement.value = url;
@@ -242,12 +276,12 @@ function resumePlaybackAfterLoad(){
   shouldResumeAfterLoad = false;
   video.play()
     .then(() => {
-      if(video.muted || video.volume === 0) showSoundButton();
-      else hideSoundButton();
+      hideSoundButton();
       log("Canal trocado sem recarregar","ok");
     })
     .catch(() => {
-      showSoundButton();
+      // só mostra o botão se o usuário ainda não interagiu
+      if(!hasUserStarted) showSoundButton();
       log("Canal trocado - toque em ASSISTIR para continuar","warn");
     });
 }
@@ -296,7 +330,7 @@ function switchStream(newUrl, options = {}){
     hideBuf();
     if(shouldResumeAfterLoad) resumePlaybackAfterLoad();
     else if(!hasUserStarted) startMutedAutoplay();
-    else showSoundButton();
+    else video.play().catch(() => {});
   } else {
     hideBuf();
     log("HLS não suportado neste browser.","err");
@@ -319,6 +353,7 @@ async function startWatching(){
 }
 
 video.addEventListener("volumechange", () => {
+  if(!hasUserStarted) return; // antes de interagir, o botão é controlado pelo autoplay
   if(video.muted || video.volume === 0){
     showSoundButton();
   } else {
@@ -399,8 +434,9 @@ function initHls(){
     } else if(!hasUserStarted){
       startMutedAutoplay();
     } else {
-      showSoundButton();
-      log("Stream pronto - toque em ASSISTIR","inf");
+      // usuário já interagiu — retoma sem mostrar o botão
+      video.play().catch(() => {});
+      log("Stream pronto","inf");
     }
   });
 
@@ -414,7 +450,7 @@ function initHls(){
   video.addEventListener("playing", ()=>{
     hideBuf();
     st("ss","▶ reproduzindo");
-    if(video.muted) showSoundButton();
+    if(!hasUserStarted && video.muted) showSoundButton();
   }, { once: false });
 
   video.addEventListener("waiting", ()=>{ showBuf("carregando fragmento..."); st("ss","⏳ buffering") });
@@ -497,6 +533,73 @@ if(URL_M3U8 && Hls.isSupported()){
 } else if(URL_M3U8){
   log("HLS não suportado neste browser.","err"); st("ss","✗ sem suporte");
 }
+
+// ── Canais ────────────────────────────────────────────────────────────────────
+function addChannelBtn(name, url){
+  const container = document.getElementById("channels-list");
+  const empty = container.querySelector(".ch-empty");
+  if(empty) empty.remove();
+
+  if(url === URL_M3U8 && activeChannel === null) activeChannel = name;
+
+  const btn = document.createElement("button");
+  btn.className = "ch-btn" + (name === activeChannel ? " active" : "");
+  btn.textContent = name;
+  btn.dataset.url = url;
+  btn.onclick = () => {
+    activeChannel = name;
+    document.querySelectorAll(".ch-btn").forEach(b => b.classList.remove("active"));
+    btn.classList.add("active");
+    switchStream(url, { resumeCurrent: true, source: "channel" });
+    log("Canal: " + name, "inf");
+  };
+  container.appendChild(btn);
+}
+
+async function checkUrl(url){
+  try {
+    const r = await fetch("/check?url=" + encodeURIComponent(url));
+    const d = await r.json();
+    return d.ok;
+  } catch { return false; }
+}
+
+async function discoverChannel(name, urls){
+  for(const url of urls){
+    const slug = url.split("/").pop();
+    log("verificando " + name + " → " + slug, "inf");
+    const ok = await checkUrl(url);
+    if(ok){
+      log(name + " ✓ online", "ok");
+      addChannelBtn(name, url);
+      return;
+    }
+  }
+  log(name + " ✗ indisponível", "warn");
+}
+
+async function discoverChannels(channelMap){
+  document.getElementById("channels-list").innerHTML =
+    '<span class="ch-empty">Verificando canais...</span>';
+  log("Iniciando verificação de canais...", "inf");
+  const entries = Object.entries(channelMap);
+  await Promise.all(entries.map(([name, urls]) => discoverChannel(name, urls)));
+  const found = document.getElementById("channels-list").querySelectorAll(".ch-btn").length;
+  log(found + "/" + entries.length + " canais disponíveis", found > 0 ? "ok" : "warn");
+}
+
+// SSE — recebe lista atualizada de canais e re-descobre
+(function connectSSE(){
+  const es = new EventSource("/events");
+  es.addEventListener("channels_updated", e => {
+    try { discoverChannels(JSON.parse(e.data)); }
+    catch(err) { console.error("SSE parse error", err); }
+  });
+  es.onerror = () => {
+    es.close();
+    setTimeout(connectSSE, 5000);
+  };
+})();
 </script>
 </body>
 </html>

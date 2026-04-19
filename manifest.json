@@ -1,7 +1,7 @@
 {
-  "name": "HLS Player",
-  "short_name": "HLS",
-  "description": "Player de video HLS simples",
+  "name": "Gol AO VIVO TV",
+  "short_name": "GolTV",
+  "description": "Gol AO VIVO TV — transmissões ao vivo",
   "id": "/",
   "start_url": "/",
   "scope": "/",

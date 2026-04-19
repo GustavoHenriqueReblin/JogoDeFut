@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8"/>
   <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
-  <title>Admin - HLS Player</title>
+  <title>Admin - Gol AO VIVO TV</title>
   <style>
     @import url('https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=Syne:wght@700;800&display=swap');
     *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
@@ -15,7 +15,7 @@
     body{
       background:var(--bg);color:var(--text);font-family:'Syne',sans-serif;
       min-height:100vh;display:flex;flex-direction:column;
-      align-items:center;padding:40px 20px;gap:24px;
+      align-items:center;padding:40px 20px;gap:28px;
     }
     body::before{
       content:'';position:fixed;inset:0;
@@ -24,39 +24,129 @@
     }
     header{position:relative;z-index:1;text-align:center}
     header h1{font-size:1.8rem;font-weight:800;letter-spacing:-.03em;color:var(--accent)}
-    .admin-form{
-      position:relative;z-index:1;width:100%;max-width:600px;
+    .card{
+      position:relative;z-index:1;width:100%;max-width:700px;
       background:var(--surface);border:1px solid var(--border);
-      border-radius:8px;padding:20px;display:flex;flex-direction:column;gap:16px;
+      border-radius:10px;padding:20px;display:flex;flex-direction:column;gap:14px;
     }
-    .admin-form label{font-family:'DM Mono',monospace;font-size:.78rem;color:var(--muted);text-transform:uppercase;letter-spacing:.1em}
-    .admin-form input{
-      background:var(--bg);border:1px solid var(--border);color:var(--text);
+    .card-title{font-family:'DM Mono',monospace;font-size:.62rem;color:var(--muted);letter-spacing:.1em;text-transform:uppercase}
+    .row{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+    input[type=text]{
+      flex:1;background:var(--bg);border:1px solid var(--border);color:var(--text);
       font-family:'DM Mono',monospace;font-size:.78rem;
-      border-radius:6px;padding:12px;outline:none;width:100%;
+      border-radius:6px;padding:9px 12px;outline:none;min-width:0;
     }
-    .admin-form button{
+    .btn{
       background:var(--accent);border:none;color:#000;
       font-family:'DM Mono',monospace;font-size:.78rem;font-weight:500;
-      border-radius:6px;padding:12px;cursor:pointer;transition:all .15s;
+      border-radius:6px;padding:9px 16px;cursor:pointer;transition:all .15s;white-space:nowrap;
     }
-    .admin-form button:hover{background:#d4ff3f}
-    .message{font-family:'DM Mono',monospace;font-size:.72rem;color:var(--accent2);text-align:center;padding:10px 0}
-    .current{font-family:'DM Mono',monospace;font-size:.62rem;color:var(--muted);margin-top:8px}
+    .btn:hover{background:#d4ff3f}
+    .btn-ghost{
+      background:transparent;border:1px solid var(--border);color:var(--muted);
+      font-family:'DM Mono',monospace;font-size:.72rem;
+      border-radius:6px;padding:5px 12px;cursor:pointer;transition:all .15s;white-space:nowrap;
+    }
+    .btn-ghost:hover{border-color:var(--error);color:var(--error)}
+    .btn-sm{
+      background:transparent;border:1px solid var(--border);color:var(--muted);
+      font-family:'DM Mono',monospace;font-size:.68rem;
+      border-radius:6px;padding:4px 10px;cursor:pointer;transition:all .15s;white-space:nowrap;
+    }
+    .btn-sm:hover{border-color:var(--accent2);color:var(--accent2)}
+    .message{font-family:'DM Mono',monospace;font-size:.72rem;color:var(--accent2)}
+    .channel-block{
+      border:1px solid var(--border);border-radius:8px;padding:14px;
+      display:flex;flex-direction:column;gap:10px;
+    }
+    .ch-header{display:flex;align-items:center;gap:10px;justify-content:space-between;flex-wrap:wrap}
+    .ch-name{font-size:1rem;font-weight:700;color:var(--accent)}
+    .ch-status{font-family:'DM Mono',monospace;font-size:.65rem;color:var(--muted)}
+    .ch-status.ok{color:var(--accent2)}
+    .url-list{display:flex;flex-direction:column;gap:6px}
+    .url-row{
+      display:flex;align-items:center;gap:8px;
+      font-family:'DM Mono',monospace;font-size:.68rem;color:var(--muted);
+      background:var(--bg);border-radius:6px;padding:6px 10px;
+    }
+    .url-row.active-url{color:var(--accent2);border:1px solid var(--accent2);}
+    .url-text{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+    .add-url-row{display:flex;gap:8px}
+    .divider{border:none;border-top:1px solid var(--border);margin:4px 0}
+    .no-channels{font-family:'DM Mono',monospace;font-size:.78rem;color:var(--muted);text-align:center;padding:10px 0}
   </style>
 </head>
 <body>
 <header>
-  <h1>ADMIN - HLS PLAYER</h1>
+  <h1>ADMIN — GOL AO VIVO TV</h1>
 </header>
-<form class="admin-form" method="post">
-  <label>URL DO STREAM ATUAL</label>
-  <input type="text" name="url" value="{{ current_url }}" placeholder="Cole a URL .m3u8 aqui">
-  <div class="current">Atual: {{ current_url or 'Nenhuma' }}</div>
-  <button type="submit">ATUALIZAR URL</button>
-  {% if message %}
-  <div class="message">{{ message }}</div>
+
+<!-- URL global do stream -->
+<div class="card">
+  <div class="card-title">URL global do stream (START_URL override)</div>
+  <form method="post" class="row">
+    <input type="text" name="url" value="{{ current_url }}" placeholder="Cole a URL .m3u8 aqui">
+    <button class="btn" type="submit">ATUALIZAR</button>
+  </form>
+  {% if message %}<div class="message">{{ message }}</div>{% endif %}
+</div>
+
+<!-- Criar canal -->
+<div class="card">
+  <div class="card-title">Novo canal</div>
+  <form action="/admin/channels" method="post" class="row">
+    <input type="text" name="name" placeholder="Nome do canal (ex: ESPN)">
+    <button class="btn" type="submit">CRIAR</button>
+  </form>
+</div>
+
+<!-- Lista de canais -->
+<div class="card">
+  <div class="card-title">Canais ({{ channels|length }})</div>
+
+  {% if not channels %}
+    <div class="no-channels">Nenhum canal cadastrado</div>
+  {% else %}
+    {% for name, ch in channels.items() %}
+    <div class="channel-block">
+      <div class="ch-header">
+        <div>
+          <div class="ch-name">{{ name }}</div>
+          <div class="ch-status">{{ ch|length }} URL(s)</div>
+        </div>
+        <div style="display:flex;gap:8px">
+          <form action="/admin/channels/{{ name }}/delete" method="post"
+                onsubmit="return confirm('Deletar canal {{ name }}?')">
+            <button class="btn-ghost" type="submit">DELETAR</button>
+          </form>
+        </div>
+      </div>
+
+      <hr class="divider">
+
+      <div class="url-list">
+        {% for url in ch %}
+        <div class="url-row">
+          <span class="url-text" title="{{ url }}">{{ url }}</span>
+          <form action="/admin/channels/{{ name }}/urls/{{ loop.index0 }}/delete" method="post">
+            <button class="btn-sm" type="submit" style="color:var(--error);border-color:var(--error)">✕</button>
+          </form>
+        </div>
+        {% else %}
+        <div style="font-family:'DM Mono',monospace;font-size:.72rem;color:var(--muted)">Nenhuma URL</div>
+        {% endfor %}
+      </div>
+
+      <div class="add-url-row">
+        <form action="/admin/channels/{{ name }}/urls" method="post" class="row" style="width:100%">
+          <input type="text" name="url" placeholder="Adicionar URL .m3u8">
+          <button class="btn-sm" type="submit" style="border-color:var(--accent);color:var(--accent)">+ ADD</button>
+        </form>
+      </div>
+    </div>
+    {% endfor %}
   {% endif %}
-</form>
+</div>
+
 </body>
 </html>

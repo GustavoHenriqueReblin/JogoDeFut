@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python -c \"from PIL import Image; print\\('ok'\\)\")",
+      "Bash(pip install *)"
+    ]
+  }
+}
