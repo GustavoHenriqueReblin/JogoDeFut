@@ -3,22 +3,37 @@ import os
 import sys
 import subprocess
 
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    env_path = os.path.join(os.path.dirname(__file__), ".env")
+    if os.path.exists(env_path):
+        with open(env_path, encoding="utf-8") as env_file:
+            for line in env_file:
+                line = line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                key, value = line.split("=", 1)
+                os.environ.setdefault(key.strip(), value.strip())
+
 def install(pkg):
     subprocess.run([sys.executable, "-m", "pip", "install", pkg],
                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 try:
-    from flask import Flask, render_template_string, request
+    from flask import Flask, render_template_string, request, send_file, send_from_directory
     from flask_cors import CORS
 except ImportError:
     print("Instalando dependências...")
     install("flask")
     install("flask-cors")
-    from flask import Flask, render_template_string, request
+    from flask import Flask, render_template_string, request, send_file, send_from_directory
     from flask_cors import CORS
 
 app = Flask(__name__)
 CORS(app)
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 PORT = int(os.environ.get('PORT', 5000))
 DEFAULT_URL = os.environ.get('START_URL', '')
 current_url = DEFAULT_URL
@@ -31,6 +46,10 @@ HTML = """<!DOCTYPE html>
   <meta name="theme-color" content="#e8ff47"/>
   <meta name="description" content="Player de vídeo HLS simples"/>
   <link rel="manifest" href="/manifest.json"/>
+  <link rel="icon" type="image/png" sizes="32x32" href="/static/icons/logo-32.png"/>
+  <link rel="icon" type="image/png" sizes="192x192" href="/static/icons/logo-192.png"/>
+  <link rel="shortcut icon" href="/favicon.ico"/>
+  <link rel="apple-touch-icon" href="/static/icons/logo-192.png"/>
   <title>HLS Player</title>
   <script src="https://cdn.jsdelivr.net/npm/hls.js@latest"></script>
   <style>
@@ -46,6 +65,11 @@ HTML = """<!DOCTYPE html>
       min-height:100vh;display:flex;flex-direction:column;
       align-items:center;padding:40px 20px;gap:24px;
     }
+    body.compact .url-badge,
+    body.compact .url-input,
+    body.compact .stats,
+    body.compact .quality-bar,
+    body.compact .log{display:none}
     body::before{
       content:'';position:fixed;inset:0;
       background-image:linear-gradient(var(--border) 1px,transparent 1px),linear-gradient(90deg,var(--border) 1px,transparent 1px);
@@ -88,6 +112,15 @@ HTML = """<!DOCTYPE html>
     .spinner{width:36px;height:36px;border:3px solid #333;border-top-color:var(--accent);border-radius:50%;animation:spin .7s linear infinite}
     @keyframes spin{to{transform:rotate(360deg)}}
     #buf-msg{font-family:'DM Mono',monospace;font-size:.75rem;color:var(--muted)}
+    .sound-btn{
+      position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);z-index:12;
+      background:var(--accent);border:none;color:#000;
+      font-family:'DM Mono',monospace;font-size:.9rem;font-weight:500;
+      border-radius:8px;padding:14px 22px;cursor:pointer;transition:all .15s;
+      box-shadow:0 8px 26px rgba(0,0,0,.45);
+    }
+    .sound-btn:hover{background:#d4ff3f;transform:translate(-50%,-50%) scale(1.03)}
+    .sound-btn.hidden{display:none}
     .stats{position:relative;z-index:1;display:flex;gap:10px;width:100%;max-width:900px;flex-wrap:wrap}
     .stat{background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:10px 16px;flex:1;min-width:110px}
     .stat-label{font-family:'DM Mono',monospace;font-size:.62rem;color:var(--muted);letter-spacing:.1em;text-transform:uppercase}
@@ -110,6 +143,8 @@ HTML = """<!DOCTYPE html>
     }
     .q-btn:hover{border-color:var(--accent);color:var(--accent)}
     .q-btn.active{border-color:var(--accent);color:var(--accent);background:rgba(232,255,71,.07)}
+    .install-btn{display:none}
+    body.show-log .install-btn.is-ready{display:inline-block}
     .log{
       position:relative;z-index:1;width:100%;max-width:900px;
       background:var(--surface);border:1px solid var(--border);
@@ -121,7 +156,7 @@ HTML = """<!DOCTYPE html>
     ::-webkit-scrollbar{width:4px} ::-webkit-scrollbar-thumb{background:var(--border);border-radius:4px}
   </style>
 </head>
-<body>
+<body class="{{ 'show-log' if show_log else 'compact' }}">
 <header>
   <h1>▶ HLS PLAYER</h1>
   <div class="url-badge" id="url-display"></div>
@@ -133,7 +168,8 @@ HTML = """<!DOCTYPE html>
 </div>
 
 <div class="video-wrap">
-  <video id="v" controls autoplay playsinline></video>
+  <video id="v" controls autoplay muted></video>
+  <button class="sound-btn" id="sound-btn" type="button" onclick="startWatching()">ASSISTIR EM TELA CHEIA</button>
   <div id="buf-overlay">
     <div class="spinner"></div>
     <div id="buf-msg">rebufferizando...</div>
@@ -152,6 +188,7 @@ HTML = """<!DOCTYPE html>
   <label>QUALIDADE</label>
   <button class="q-btn active" onclick="setAuto()">AUTO</button>
   <select id="q-select" onchange="setLevel(this.value)" style="display:none"></select>
+  <button class="q-btn install-btn" id="install-btn" type="button">INSTALAR</button>
 </div>
 
 <div class="log" id="log"></div>
@@ -159,12 +196,15 @@ HTML = """<!DOCTYPE html>
 <script>
 let URL_M3U8 = {{ url|tojson }};
 const video = document.getElementById("v");
+video.muted = true;
+video.defaultMuted = true;
 const overlay = document.getElementById("buf-overlay");
 const bufMsg = document.getElementById("buf-msg");
 const inputElement = document.getElementById('url-input');
 let retries = 0;
 let hls;
 let fullscreenDone = false;
+let deferredInstallPrompt = null;
 
 if(URL_M3U8){
   inputElement.value = URL_M3U8;
@@ -192,6 +232,24 @@ if('serviceWorker' in navigator){
     .catch(err => console.log('Erro SW:', err));
 }
 
+window.addEventListener('beforeinstallprompt', (event) => {
+  event.preventDefault();
+  deferredInstallPrompt = event;
+  const installButton = document.getElementById('install-btn');
+  installButton.classList.add('is-ready');
+  installButton.onclick = async () => {
+    installButton.classList.remove('is-ready');
+    deferredInstallPrompt.prompt();
+    await deferredInstallPrompt.userChoice;
+    deferredInstallPrompt = null;
+  };
+});
+
+window.addEventListener('appinstalled', () => {
+  deferredInstallPrompt = null;
+  document.getElementById('install-btn').classList.remove('is-ready');
+});
+
 function log(msg, t=""){
   const d=document.getElementById("log"), l=document.createElement("div");
   l.className="ll "+t;
@@ -201,24 +259,58 @@ function log(msg, t=""){
 function st(id,v){ document.getElementById(id).textContent=v }
 function showBuf(msg){ overlay.classList.add("show"); bufMsg.textContent=msg||"rebufferizando..." }
 function hideBuf(){ overlay.classList.remove("show") }
+function showSoundButton(){
+  document.getElementById("sound-btn").classList.remove("hidden");
+}
+function hideSoundButton(){
+  document.getElementById("sound-btn").classList.add("hidden");
+}
+async function startWatching(){
+  video.muted = false;
+  video.defaultMuted = false;
+  video.volume = 1;
+  try {
+    await video.play();
+    hideSoundButton();
+    log("Som ativado pelo usuário","inf");
+    tryFullscreen();
+  } catch (err) {
+    log("Browser bloqueou reprodução com áudio — toque novamente","warn");
+  }
+}
 
-// Tenta fullscreen — browsers exigem que seja disparado dentro de um evento
-// ou logo após uma interação do usuário. Aqui tentamos assim que o vídeo começa
-// a tocar, que conta como interação iniciada pelo usuário via autoplay.
+video.addEventListener("volumechange", () => {
+  if(video.muted || video.volume === 0){
+    showSoundButton();
+  } else {
+    hideSoundButton();
+  }
+});
+
+// Tenta fullscreen a partir do toque no botão ASSISTIR.
 function tryFullscreen(){
   if(fullscreenDone) return;
-  fullscreenDone = true;
   const el = video;
+  if(el.webkitEnterFullscreen){
+    el.webkitEnterFullscreen();
+    fullscreenDone = true;
+    return;
+  }
   const req = el.requestFullscreen
     || el.webkitRequestFullscreen
     || el.mozRequestFullScreen
     || el.msRequestFullscreen;
   if(req){
-    req.call(el).catch(err=>{
+    const result = req.call(el);
+    fullscreenDone = true;
+    if(result && result.catch){
+      result.catch(()=>{
+        fullscreenDone = false;
       // Navegador bloqueou fullscreen automático (política do browser)
       // Aparece um botão pra o usuário clicar manualmente
       log("Fullscreen bloqueado pelo browser — clique no botão ⛶ no player","warn");
-    });
+      });
+    }
   }
 }
 
@@ -253,8 +345,9 @@ function initHls(){
 
   hls.on(Hls.Events.MANIFEST_PARSED, (e, d) => {
     log("Manifest OK — "+d.levels.length+" qualidade(s)","ok");
-    st("ss","▶ reproduzindo");
+    st("ss","pronto");
     hideBuf();
+    showSoundButton();
     const sel = document.getElementById("q-select");
     sel.innerHTML = "";
     d.levels.forEach((l,i)=>{
@@ -265,11 +358,7 @@ function initHls(){
     });
     if(d.levels.length>1) sel.style.display="inline-block";
 
-    // Inicia o vídeo — fullscreen é pedido assim que começar a tocar
-    video.play().catch(()=>{
-      // Autoplay com som bloqueado? Tenta novamente
-      video.play();
-    });
+    log("Stream pronto - toque em ASSISTIR","inf");
   });
 
   hls.on(Hls.Events.LEVEL_SWITCHED, (e, d) => {
@@ -283,8 +372,7 @@ function initHls(){
   video.addEventListener("playing", ()=>{
     hideBuf();
     st("ss","▶ reproduzindo");
-    video.muted = false;  // Garantir desmute
-    tryFullscreen();
+    if(video.muted) showSoundButton();
   }, { once: false });
 
   video.addEventListener("waiting", ()=>{ showBuf("carregando fragmento..."); st("ss","⏳ buffering") });
@@ -362,7 +450,9 @@ function connect(){
   st("sq","—");
   st("sb","—");
   st("sc","—");
-  video.muted = false;
+  video.muted = true;
+  video.defaultMuted = true;
+  showSoundButton();
   initHls();
 }
 
@@ -370,8 +460,8 @@ if(URL_M3U8 && Hls.isSupported()){
   initHls();
 } else if(URL_M3U8 && video.canPlayType("application/vnd.apple.mpegurl")){
   video.src=URL_M3U8;
-  video.play().catch(()=>{ video.play(); });
-  log("Player nativo","ok"); st("ss","▶ nativo");
+  showSoundButton();
+  log("Player nativo pronto - toque em ASSISTIR","ok"); st("ss","pronto");
 } else if(URL_M3U8){
   log("HLS não suportado neste browser.","err"); st("ss","✗ sem suporte");
 }
@@ -382,7 +472,8 @@ if(URL_M3U8 && Hls.isSupported()){
 @app.route("/")
 def index():
     url = request.args.get('url', current_url)
-    return render_template_string(HTML, url=url)
+    show_log = 'showLog' in request.args
+    return render_template_string(HTML, url=url, show_log=show_log)
 
 @app.route("/current_url")
 def get_current_url():
@@ -390,11 +481,15 @@ def get_current_url():
 
 @app.route("/manifest.json")
 def manifest():
-    return app.send_static_file('manifest.json')
+    return send_from_directory(BASE_DIR, 'manifest.json', mimetype='application/manifest+json')
 
 @app.route("/sw.js")
 def sw():
-    return app.send_static_file('sw.js')
+    return send_from_directory(BASE_DIR, 'sw.js', mimetype='application/javascript')
+
+@app.route("/favicon.ico")
+def favicon():
+    return send_file(os.path.join(BASE_DIR, "static", "icons", "logo-48.png"), mimetype="image/png")
 
 @app.route("/admin", methods=["GET", "POST"])
 def admin():
