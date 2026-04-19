@@ -168,7 +168,7 @@ HTML = """<!DOCTYPE html>
 </div>
 
 <div class="video-wrap">
-  <video id="v" controls autoplay muted></video>
+  <video id="v" controls autoplay muted playsinline></video>
   <button class="sound-btn" id="sound-btn" type="button" onclick="startWatching()">ASSISTIR EM TELA CHEIA</button>
   <div id="buf-overlay">
     <div class="spinner"></div>
@@ -205,6 +205,8 @@ let retries = 0;
 let hls;
 let fullscreenDone = false;
 let deferredInstallPrompt = null;
+let hasUserStarted = false;
+let shouldResumeAfterLoad = false;
 
 if(URL_M3U8){
   inputElement.value = URL_M3U8;
@@ -212,14 +214,14 @@ if(URL_M3U8){
   document.getElementById('url-display').title = URL_M3U8;
 }
 
-// Polling para verificar mudanças na URL e forçar refresh
+// Polling para verificar mudanças na URL sem recarregar a página.
 setInterval(() => {
   fetch('/current_url')
     .then(r => r.text())
     .then(url => {
       if(url !== URL_M3U8 && url.trim()){
-        log("URL mudou — recarregando página","inf");
-        location.reload();
+        log("Trocando canal","inf");
+        switchStream(url, { resumeCurrent: true, source: "admin" });
       }
     })
     .catch(err => console.log('Erro no polling:', err));
@@ -265,7 +267,86 @@ function showSoundButton(){
 function hideSoundButton(){
   document.getElementById("sound-btn").classList.add("hidden");
 }
+function updateUrlDisplay(url){
+  inputElement.value = url;
+  document.getElementById('url-display').textContent = url;
+  document.getElementById('url-display').title = url;
+}
+function resetStreamStats(){
+  retries = 0;
+  st("sr", retries);
+  st("sq","—");
+  st("sb","—");
+  st("sc","—");
+}
+function resumePlaybackAfterLoad(){
+  if(!shouldResumeAfterLoad) return;
+  shouldResumeAfterLoad = false;
+  video.play()
+    .then(() => {
+      if(video.muted || video.volume === 0) showSoundButton();
+      else hideSoundButton();
+      log("Canal trocado sem recarregar","ok");
+    })
+    .catch(() => {
+      showSoundButton();
+      log("Canal trocado - toque em ASSISTIR para continuar","warn");
+    });
+}
+function startMutedAutoplay(){
+  video.muted = true;
+  video.defaultMuted = true;
+  video.play()
+    .then(() => {
+      st("ss","▶ reproduzindo");
+      showSoundButton();
+      log("Autoplay mutado ativo","ok");
+    })
+    .catch(() => {
+      showSoundButton();
+      log("Autoplay bloqueado - toque em ASSISTIR","warn");
+    });
+}
+function switchStream(newUrl, options = {}){
+  newUrl = (newUrl || "").trim();
+  if(!newUrl || newUrl === URL_M3U8) return;
+
+  const wasPlaying = hasUserStarted && !video.paused;
+  const wasMuted = video.muted;
+  URL_M3U8 = newUrl;
+  shouldResumeAfterLoad = Boolean(options.resumeCurrent && wasPlaying);
+
+  updateUrlDisplay(newUrl);
+  resetStreamStats();
+  st("ss", options.source === "admin" ? "trocando canal..." : "carregando...");
+  showBuf(options.source === "admin" ? "trocando canal..." : "carregando stream...");
+  video.muted = wasMuted;
+  video.defaultMuted = wasMuted;
+
+  if(Hls.isSupported()){
+    if(hls){
+      hls.stopLoad();
+      hls.loadSource(URL_M3U8);
+      hls.startLoad();
+    } else {
+      initHls();
+    }
+  } else if(video.canPlayType("application/vnd.apple.mpegurl")){
+    if(hls){ hls.destroy(); hls = null; }
+    video.src = URL_M3U8;
+    st("ss","pronto");
+    hideBuf();
+    if(shouldResumeAfterLoad) resumePlaybackAfterLoad();
+    else if(!hasUserStarted) startMutedAutoplay();
+    else showSoundButton();
+  } else {
+    hideBuf();
+    log("HLS não suportado neste browser.","err");
+    st("ss","✗ sem suporte");
+  }
+}
 async function startWatching(){
+  hasUserStarted = true;
   video.muted = false;
   video.defaultMuted = false;
   video.volume = 1;
@@ -306,9 +387,7 @@ function tryFullscreen(){
     if(result && result.catch){
       result.catch(()=>{
         fullscreenDone = false;
-      // Navegador bloqueou fullscreen automático (política do browser)
-      // Aparece um botão pra o usuário clicar manualmente
-      log("Fullscreen bloqueado pelo browser — clique no botão ⛶ no player","warn");
+        log("Fullscreen bloqueado pelo browser - toque em ASSISTIR novamente","warn");
       });
     }
   }
@@ -347,9 +426,9 @@ function initHls(){
     log("Manifest OK — "+d.levels.length+" qualidade(s)","ok");
     st("ss","pronto");
     hideBuf();
-    showSoundButton();
     const sel = document.getElementById("q-select");
     sel.innerHTML = "";
+    sel.style.display = "none";
     d.levels.forEach((l,i)=>{
       const opt=document.createElement("option");
       opt.value=i;
@@ -358,7 +437,14 @@ function initHls(){
     });
     if(d.levels.length>1) sel.style.display="inline-block";
 
-    log("Stream pronto - toque em ASSISTIR","inf");
+    if(shouldResumeAfterLoad){
+      resumePlaybackAfterLoad();
+    } else if(!hasUserStarted){
+      startMutedAutoplay();
+    } else {
+      showSoundButton();
+      log("Stream pronto - toque em ASSISTIR","inf");
+    }
   });
 
   hls.on(Hls.Events.LEVEL_SWITCHED, (e, d) => {
@@ -368,7 +454,7 @@ function initHls(){
     document.getElementById("q-select").value = d.level;
   });
 
-  // Assim que o vídeo começa a tocar de verdade → fullscreen e desmutar
+  // Mantem o status e o CTA de som sincronizados com o estado real do video.
   video.addEventListener("playing", ()=>{
     hideBuf();
     st("ss","▶ reproduzindo");
@@ -441,19 +527,7 @@ function connect(){
     log("URL vazia","warn");
     return;
   }
-  URL_M3U8 = newUrl;
-  document.getElementById('url-display').textContent = newUrl;
-  document.getElementById('url-display').title = newUrl;
-  st("ss","carregando...");
-  retries = 0;
-  st("sr", retries);
-  st("sq","—");
-  st("sb","—");
-  st("sc","—");
-  video.muted = true;
-  video.defaultMuted = true;
-  showSoundButton();
-  initHls();
+  switchStream(newUrl, { resumeCurrent: true, source: "manual" });
 }
 
 if(URL_M3U8 && Hls.isSupported()){
@@ -461,7 +535,9 @@ if(URL_M3U8 && Hls.isSupported()){
 } else if(URL_M3U8 && video.canPlayType("application/vnd.apple.mpegurl")){
   video.src=URL_M3U8;
   showSoundButton();
-  log("Player nativo pronto - toque em ASSISTIR","ok"); st("ss","pronto");
+  st("ss","pronto");
+  log("Player nativo pronto - toque em ASSISTIR","ok");
+  startMutedAutoplay();
 } else if(URL_M3U8){
   log("HLS não suportado neste browser.","err"); st("ss","✗ sem suporte");
 }
