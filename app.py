@@ -1,12 +1,15 @@
 #!/usr/bin/env python3
 import os
+import re
 import sys
+import time
 import subprocess
 import threading
 import queue
 import json
 import functools
 from base64 import b64decode
+from urllib.parse import urlparse
 
 try:
     from dotenv import load_dotenv
@@ -43,8 +46,6 @@ app = Flask(__name__)
 CORS(app)
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 PORT = int(os.environ.get('PORT', 5000))
-DEFAULT_URL = os.environ.get('START_URL', '')
-current_url = DEFAULT_URL
 ADMIN_USER = os.environ.get('ADMIN_USER', 'admin')
 ADMIN_PASS = os.environ.get('ADMIN_PASS', 'admin')
 
@@ -70,35 +71,6 @@ _sse_clients = []
 _sse_lock = threading.Lock()
 
 
-# ── Channel data ──────────────────────────────────────────────────────────────
-
-def parse_domains(text):
-    result = {}
-    current = None
-    for line in text.splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        if line.endswith(':') and not line.startswith('http'):
-            current = line[:-1].strip().upper()
-            result[current] = []
-        elif current and line.startswith('http'):
-            result[current].append(line)
-    return result
-
-def load_channels():
-    global channels
-    data = os.environ.get('CHANNELS_DATA', '').replace('\\n', '\n')
-    if not data:
-        path = os.path.join(BASE_DIR, 'domains.txt')
-        if os.path.exists(path):
-            with open(path, encoding='utf-8') as f:
-                data = f.read()
-    if data:
-        with _channels_lock:
-            channels = parse_domains(data)
-
-
 # ── SSE ───────────────────────────────────────────────────────────────────────
 
 def channels_payload():
@@ -106,8 +78,7 @@ def channels_payload():
         data = {name: urls for name, urls in channels.items()}
     return json.dumps(data)
 
-def notify_sse():
-    msg = f"event: channels_updated\ndata: {channels_payload()}\n\n"
+def _push_sse(msg):
     dead = []
     with _sse_lock:
         for q in _sse_clients:
@@ -117,6 +88,13 @@ def notify_sse():
                 dead.append(q)
         for q in dead:
             _sse_clients.remove(q)
+
+def notify_sse():
+    _push_sse(f"event: channels_updated\ndata: {channels_payload()}\n\n")
+
+def log_sse(msg, t=""):
+    payload = json.dumps({"msg": msg, "t": t})
+    _push_sse(f"event: scrape_log\ndata: {payload}\n\n")
 
 @app.route("/events")
 def sse():
@@ -171,13 +149,8 @@ def check_url():
 
 @app.route("/")
 def index():
-    url = request.args.get('url', current_url)
     show_log = 'showLog' in request.args
-    return render_template("player.html", url=url, show_log=show_log)
-
-@app.route("/current_url")
-def get_current_url():
-    return current_url
+    return render_template("player.html", show_log=show_log)
 
 @app.route("/manifest.json")
 def manifest():
@@ -197,15 +170,9 @@ def favicon():
 @app.route("/admin", methods=["GET", "POST"])
 @require_auth
 def admin():
-    global current_url
-    message = ""
-    if request.method == "POST":
-        new_url = request.form.get("url", "").strip()
-        current_url = new_url
-        message = f"URL atualizada: {new_url}"
     with _channels_lock:
         ch_snapshot = {name: list(urls) for name, urls in channels.items()}
-    return render_template("admin.html", current_url=current_url, message=message, channels=ch_snapshot)
+    return render_template("admin.html", channels=ch_snapshot)
 
 @app.route("/admin/channels", methods=["POST"])
 @require_auth
@@ -250,9 +217,117 @@ def admin_remove_url(name, idx):
     return redirect(url_for("admin"))
 
 
+# ── Futemax scraper ───────────────────────────────────────────────────────────
+
+FUTEMAX_BASE = os.environ.get('FUTEMAX_BASE', 'https://futemax.ad')
+SCRAPE_INTERVAL = int(os.environ.get('SCRAPE_INTERVAL', 1800))
+
+FUTEMAX_CHANNEL_MAP = {
+    "PRIMEVIDEO": ["/prime-video-ao-vivo/"],
+    "PREMIERE": [
+        "/premiere-fc-ao-vivo-assista-online-em-hd/",
+        "/premiere-2-ao-vivo-assista-online-em-hd-gratuitamente/",
+        "/premiere-3-ao-vivo-assista-online-em-hd-gratuitamente/",
+        "/premiere-4-ao-vivo-assista-online-em-hd-gratuitamente/",
+        "/premiere-5-ao-vivo-assista-online-em-hd-gratuitamente/",
+        "/premiere-6-ao-vivo-assista-online-em-hd-gratuitamente/",
+        "/premiere-7-ao-vivo-assista-online-em-hd-gratuitamente/",
+    ],
+    "GLOBO": [
+        "/globo-sp-ao-vivo-assista-online-em-hd/",
+        "/globo-rj-ao-vivo-online-futebol-noticias-e-programas-em-hd/",
+        "/globo-mg-ao-vivo/",
+    ],
+    "SPORTV": [
+        "/sportv-ao-vivo-assista-esportes-online-em-hd/",
+        "/sportv-2-ao-vivo-assista-esportes-em-hd/",
+        "/sportv-3-ao-vivo-assista-esportes-em-hd/",
+    ],
+    "TNT": ["/tnt-ao-vivo-assista-futebol-internacional-em-hd-no-futemax/"],
+    "SBT": ["/sbt-ao-vivo-assista-online-em-hd/"],
+    "BAND": [
+        "/band-tv-ao-vivo-assista-online-em-hd/",
+        "/bandsports-ao-vivo-assista-esportes-em-hd/",
+    ],
+    "ESPN": [
+        "/espn-ao-vivo-assista-esportes-online-em-hd/",
+        "/espn-2-ao-vivo-assista-esportes-em-hd/",
+        "/espn-3-ao-vivo-assista-esportes-em-hd/",
+        "/espn-4-ao-vivo-assista-esportes-em-hd/",
+    ],
+}
+
+_SCRAPE_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+    "Accept-Language": "pt-BR,pt;q=0.9",
+}
+
+def _m3u8_from_player(player_url):
+    try:
+        r = http_requests.get(
+            player_url,
+            headers={**_SCRAPE_HEADERS, "Referer": FUTEMAX_BASE + "/"},
+            timeout=10,
+        )
+        m = re.search(r'"stream"\s*:\s*"([^"]+\.m3u8[^"]*)"', r.text)
+        if m:
+            return m.group(1)
+    except Exception:
+        pass
+    return None
+
+def _scrape_slug(slug):
+    page_url = FUTEMAX_BASE + slug
+    try:
+        r = http_requests.get(page_url, headers=_SCRAPE_HEADERS, timeout=10)
+        player_urls = re.findall(r'<button[^>]+data-src="([^"]+)"', r.text)
+        if not player_urls:
+            log_sse(f"scraper: sem botões em {slug}", "warn")
+            return []
+        found = []
+        for pu in player_urls:
+            m3u8 = _m3u8_from_player(pu)
+            if m3u8:
+                found.append(m3u8)
+                log_sse(f"scraper: m3u8 encontrado via {urlparse(pu).netloc}", "ok")
+            else:
+                log_sse(f"scraper: sem m3u8 em {urlparse(pu).netloc}", "warn")
+        return found
+    except Exception as e:
+        msg = str(e)
+        short = msg[:80] + "..." if len(msg) > 80 else msg
+        log_sse(f"scraper: erro em {slug} — {short}", "err")
+        return []
+
+def scrape_all_channels():
+    log_sse("scraper: iniciando ciclo de busca...", "inf")
+    updated = {}
+    for channel, slugs in FUTEMAX_CHANNEL_MAP.items():
+        urls = []
+        for slug in slugs:
+            urls.extend(_scrape_slug(slug))
+        if urls:
+            updated[channel] = urls
+            log_sse(f"scraper: {channel} → {len(urls)} URL(s)", "ok")
+        else:
+            log_sse(f"scraper: {channel} → nenhuma URL encontrada", "warn")
+    if updated:
+        with _channels_lock:
+            for ch, urls in updated.items():
+                channels[ch] = urls
+        notify_sse()
+    log_sse(f"scraper: ciclo concluído — {len(updated)}/{len(FUTEMAX_CHANNEL_MAP)} canais atualizados", "inf")
+
+def _scrape_loop():
+    scrape_all_channels()
+    while True:
+        time.sleep(SCRAPE_INTERVAL)
+        scrape_all_channels()
+
+
 # ── Startup ───────────────────────────────────────────────────────────────────
 
-load_channels()
+threading.Thread(target=_scrape_loop, daemon=True).start()
 
 if __name__ == "__main__":
     print(f"Rodando na porta {PORT}")
