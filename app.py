@@ -26,7 +26,7 @@ def install(pkg):
                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 try:
-    from flask import Flask, render_template, request, send_file, send_from_directory, Response
+    from flask import Flask, render_template, request, send_file, send_from_directory, Response, jsonify
     from flask_cors import CORS
     import requests as http_requests
 except ImportError:
@@ -34,7 +34,7 @@ except ImportError:
     install("flask")
     install("flask-cors")
     install("requests")
-    from flask import Flask, render_template, request, send_file, send_from_directory, Response
+    from flask import Flask, render_template, request, send_file, send_from_directory, Response, jsonify
     from flask_cors import CORS
     import requests as http_requests
 
@@ -115,6 +115,18 @@ def sw():
 @app.route("/favicon.ico")
 def favicon():
     return send_file(os.path.join(BASE_DIR, "static", "icons", "logo-48.png"), mimetype="image/png")
+
+@app.route("/debug")
+def debug():
+    results = {}
+    for path in ["/channels?category=Futebol", "/sports?category=Futebol&status=live"]:
+        url = f"{URL_BASE}{path}"
+        try:
+            r = http_requests.get(url, headers=_HEADERS, timeout=10)
+            results[path] = {"status": r.status_code, "ok": r.ok, "body": r.json()}
+        except Exception as e:
+            results[path] = {"error": type(e).__name__, "detail": str(e)}
+    return jsonify({"url_base": URL_BASE, "results": results})
 
 
 # ── API ──────────────────────────────────────────────────────────
