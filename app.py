@@ -1,15 +1,11 @@
 #!/usr/bin/env python3
 import os
-import re
 import sys
 import time
 import subprocess
 import threading
 import queue
 import json
-import functools
-from base64 import b64decode
-from urllib.parse import urlparse
 
 try:
     from dotenv import load_dotenv
@@ -30,7 +26,7 @@ def install(pkg):
                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 try:
-    from flask import Flask, render_template, request, send_file, send_from_directory, jsonify, redirect, url_for, Response
+    from flask import Flask, render_template, request, send_file, send_from_directory, Response
     from flask_cors import CORS
     import requests as http_requests
 except ImportError:
@@ -38,7 +34,7 @@ except ImportError:
     install("flask")
     install("flask-cors")
     install("requests")
-    from flask import Flask, render_template, request, send_file, send_from_directory, jsonify, redirect, url_for, Response
+    from flask import Flask, render_template, request, send_file, send_from_directory, Response
     from flask_cors import CORS
     import requests as http_requests
 
@@ -46,25 +42,8 @@ app = Flask(__name__)
 CORS(app)
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 PORT = int(os.environ.get('PORT', 5000))
-ADMIN_USER = os.environ.get('ADMIN_USER', 'admin')
-ADMIN_PASS = os.environ.get('ADMIN_PASS', 'admin')
 
-def require_auth(f):
-    @functools.wraps(f)
-    def wrapper(*args, **kwargs):
-        auth = request.headers.get('Authorization', '')
-        if auth.startswith('Basic '):
-            try:
-                user, pw = b64decode(auth[6:]).decode().split(':', 1)
-                if user == ADMIN_USER and pw == ADMIN_PASS:
-                    return f(*args, **kwargs)
-            except Exception:
-                pass
-        return Response('Acesso negado', 401,
-                        {'WWW-Authenticate': 'Basic realm="Admin"'})
-    return wrapper
-
-# { "GLOBO": ["url1", "url2", ...] }
+# { "ESPN": {"embeds": [{"provider": "YouTube", "url": "..."}], "logo": "..."} }
 channels = {}
 _channels_lock = threading.Lock()
 _sse_clients = []
@@ -75,7 +54,7 @@ _sse_lock = threading.Lock()
 
 def channels_payload():
     with _channels_lock:
-        data = {name: urls for name, urls in channels.items()}
+        data = dict(channels)
     return json.dumps(data)
 
 def _push_sse(msg):
@@ -118,33 +97,6 @@ def sse():
                     headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
 
-# ── Public API ────────────────────────────────────────────────────────────────
-
-@app.route("/check")
-def check_url():
-    url = request.args.get("url", "").strip()
-    if not url.startswith("http"):
-        return jsonify({"ok": False})
-    try:
-        r = http_requests.get(url, timeout=8)
-        if r.status_code != 200:
-            return jsonify({"ok": False})
-        base = url.rsplit("/", 1)[0]
-        segment = None
-        for line in r.text.splitlines():
-            line = line.strip()
-            if not line or line.startswith("#"):
-                continue
-            segment = line if line.startswith("http") else base + "/" + line
-            break
-        if not segment:
-            return jsonify({"ok": True})
-        seg_r = http_requests.get(segment, timeout=6, stream=True)
-        return jsonify({"ok": seg_r.status_code == 200})
-    except Exception:
-        return jsonify({"ok": False})
-
-
 # ── Main routes ───────────────────────────────────────────────────────────────
 
 @app.route("/")
@@ -165,169 +117,106 @@ def favicon():
     return send_file(os.path.join(BASE_DIR, "static", "icons", "logo-48.png"), mimetype="image/png")
 
 
-# ── Admin ─────────────────────────────────────────────────────────────────────
+# ── API ──────────────────────────────────────────────────────────
 
-@app.route("/admin", methods=["GET", "POST"])
-@require_auth
-def admin():
-    with _channels_lock:
-        ch_snapshot = {name: list(urls) for name, urls in channels.items()}
-    return render_template("admin.html", channels=ch_snapshot)
+URL_BASE = os.environ.get('URL_BASE', '')
+POLL_INTERVAL = 1800  # atualiza eventos ao vivo a cada 30 min
 
-@app.route("/admin/channels", methods=["POST"])
-@require_auth
-def admin_create_channel():
-    name = request.form.get("name", "").strip().upper()
-    if not name:
-        return "Nome inválido", 400
-    with _channels_lock:
-        if name not in channels:
-            channels[name] = []
-    notify_sse()
-    return redirect(url_for("admin"))
-
-@app.route("/admin/channels/<name>/delete", methods=["POST"])
-@require_auth
-def admin_delete_channel(name):
-    with _channels_lock:
-        channels.pop(name, None)
-    notify_sse()
-    return redirect(url_for("admin"))
-
-@app.route("/admin/channels/<name>/urls", methods=["POST"])
-@require_auth
-def admin_add_url(name):
-    url = request.form.get("url", "").strip()
-    if not url:
-        return "URL inválida", 400
-    with _channels_lock:
-        if name in channels:
-            channels[name].append(url)
-    notify_sse()
-    return redirect(url_for("admin"))
-
-@app.route("/admin/channels/<name>/urls/<int:idx>/delete", methods=["POST"])
-@require_auth
-def admin_remove_url(name, idx):
-    with _channels_lock:
-        urls = channels.get(name, [])
-        if 0 <= idx < len(urls):
-            urls.pop(idx)
-    notify_sse()
-    return redirect(url_for("admin"))
-
-
-# ── Futemax scraper ───────────────────────────────────────────────────────────
-
-FUTEMAX_BASE = os.environ.get('FUTEMAX_BASE', 'https://futemax.ad')
-SCRAPE_INTERVAL = int(os.environ.get('SCRAPE_INTERVAL', 1800))
-
-FUTEMAX_CHANNEL_MAP = {
-    "PRIMEVIDEO": ["/prime-video-ao-vivo/"],
-    "PREMIERE": [
-        "/premiere-fc-ao-vivo-assista-online-em-hd/",
-        "/premiere-2-ao-vivo-assista-online-em-hd-gratuitamente/",
-        "/premiere-3-ao-vivo-assista-online-em-hd-gratuitamente/",
-        "/premiere-4-ao-vivo-assista-online-em-hd-gratuitamente/",
-        "/premiere-5-ao-vivo-assista-online-em-hd-gratuitamente/",
-        "/premiere-6-ao-vivo-assista-online-em-hd-gratuitamente/",
-        "/premiere-7-ao-vivo-assista-online-em-hd-gratuitamente/",
-    ],
-    "GLOBO": [
-        "/globo-sp-ao-vivo-assista-online-em-hd/",
-        "/globo-rj-ao-vivo-online-futebol-noticias-e-programas-em-hd/",
-        "/globo-mg-ao-vivo/",
-    ],
-    "SPORTV": [
-        "/sportv-ao-vivo-assista-esportes-online-em-hd/",
-        "/sportv-2-ao-vivo-assista-esportes-em-hd/",
-        "/sportv-3-ao-vivo-assista-esportes-em-hd/",
-    ],
-    "TNT": ["/tnt-ao-vivo-assista-futebol-internacional-em-hd-no-futemax/"],
-    "SBT": ["/sbt-ao-vivo-assista-online-em-hd/"],
-    "BAND": [
-        "/band-tv-ao-vivo-assista-online-em-hd/",
-        "/bandsports-ao-vivo-assista-esportes-em-hd/",
-    ],
-    "ESPN": [
-        "/espn-ao-vivo-assista-esportes-online-em-hd/",
-        "/espn-2-ao-vivo-assista-esportes-em-hd/",
-        "/espn-3-ao-vivo-assista-esportes-em-hd/",
-        "/espn-4-ao-vivo-assista-esportes-em-hd/",
-    ],
-}
-
-_SCRAPE_HEADERS = {
+_HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-    "Accept-Language": "pt-BR,pt;q=0.9",
+    "Accept": "application/json, text/plain, */*",
+    "Accept-Language": "pt-BR,pt;q=0.9,en;q=0.8",
+    "Accept-Encoding": "gzip, deflate, br",
+    "Referer": URL_BASE + "/",
+    "Origin": URL_BASE + "/",
+    "Connection": "keep-alive",
+    "Sec-Fetch-Dest": "empty",
+    "Sec-Fetch-Mode": "cors",
+    "Sec-Fetch-Site": "same-site",
 }
 
-def _m3u8_from_player(player_url):
-    try:
-        r = http_requests.get(
-            player_url,
-            headers={**_SCRAPE_HEADERS, "Referer": FUTEMAX_BASE + "/"},
-            timeout=10,
-        )
-        m = re.search(r'"stream"\s*:\s*"([^"]+\.m3u8[^"]*)"', r.text)
-        if m:
-            return m.group(1)
-    except Exception:
-        pass
-    return None
+def _get(path):
+    url = f"{URL_BASE}{path}"
+    r = http_requests.get(url, headers=_HEADERS, timeout=10)
+    r.raise_for_status()
+    return r
 
-def _scrape_slug(slug):
-    page_url = FUTEMAX_BASE + slug
+def _fetch_channels():
     try:
-        r = http_requests.get(page_url, headers=_SCRAPE_HEADERS, timeout=10)
-        player_urls = re.findall(r'<button[^>]+data-src="([^"]+)"', r.text)
-        if not player_urls:
-            log_sse(f"scraper: sem botões em {slug}", "warn")
-            return []
-        found = []
-        for pu in player_urls:
-            m3u8 = _m3u8_from_player(pu)
-            if m3u8:
-                found.append(m3u8)
-                log_sse(f"scraper: m3u8 encontrado via {urlparse(pu).netloc}", "ok")
-            else:
-                log_sse(f"scraper: sem m3u8 em {urlparse(pu).netloc}", "warn")
-        return found
+        r = _get("/channels?category=Futebol")
+        body = r.json()
+        items = body if isinstance(body, list) else body.get("data", [])
+        result = {}
+        for ch in items:
+            if not ch.get("is_active", True):
+                continue
+            name = ch.get("name") or ch.get("id", "")
+            embed = ch.get("embed_url", "")
+            if not name or not embed:
+                continue
+            result[name] = {
+                "embeds": [{"provider": "stream", "url": embed}],
+                "logo": ch.get("logo_url", ""),
+            }
+        log_sse(f"api: {len(result)} canal(is) de futebol encontrado(s)", "ok")
+        return result
     except Exception as e:
-        msg = str(e)
-        short = msg[:80] + "..." if len(msg) > 80 else msg
-        log_sse(f"scraper: erro em {slug} — {short}", "err")
-        return []
+        log_sse(f"api: erro /channels — {type(e).__name__}: {str(e)[:120]}", "err")
+        return {}
 
-def scrape_all_channels():
-    log_sse("scraper: iniciando ciclo de busca...", "inf")
-    updated = {}
-    for channel, slugs in FUTEMAX_CHANNEL_MAP.items():
-        urls = []
-        for slug in slugs:
-            urls.extend(_scrape_slug(slug))
-        if urls:
-            updated[channel] = urls
-            log_sse(f"scraper: {channel} → {len(urls)} URL(s)", "ok")
-        else:
-            log_sse(f"scraper: {channel} → nenhuma URL encontrada", "warn")
-    if updated:
+def _fetch_live_events():
+    try:
+        r = _get("/sports?category=Futebol&status=live")
+        body = r.json()
+        items = body if isinstance(body, list) else body.get("data", [])
+        result = {}
+        for ev in items:
+            name = ev.get("title") or ev.get("id", "")
+            embeds = [
+                {"provider": e.get("provider", f"Fonte {i+1}"), "url": e.get("embed_url", "")}
+                for i, e in enumerate(ev.get("embeds", []))
+                if e.get("embed_url")
+            ]
+            if not name or not embeds:
+                continue
+            result[name] = {
+                "embeds": embeds,
+                "logo": ev.get("poster", ""),
+            }
+        log_sse(f"api: {len(result)} evento(s) ao vivo encontrado(s)", "ok")
+        return result
+    except Exception as e:
+        log_sse(f"api: erro /sports — {type(e).__name__}: {str(e)[:120]}", "err")
+        return {}
+
+
+def fetch_all():
+    if not URL_BASE:
+        log_sse("api: URL_BASE não configurada no .env", "err")
+        return
+    log_sse("api: buscando canais e eventos ao vivo...", "inf")
+    ch = _fetch_channels()
+    ev = _fetch_live_events()
+    merged = {**ch, **ev}
+    if merged:
         with _channels_lock:
-            for ch, urls in updated.items():
-                channels[ch] = urls
+            channels.clear()
+            channels.update(merged)
         notify_sse()
-    log_sse(f"scraper: ciclo concluído — {len(updated)}/{len(FUTEMAX_CHANNEL_MAP)} canais atualizados", "inf")
+        log_sse(f"api: total {len(merged)} canal(is)/evento(s) carregado(s)", "inf")
+    else:
+        log_sse("api: nenhum resultado encontrado", "warn")
 
-def _scrape_loop():
-    scrape_all_channels()
+def _fetch_loop():
+    fetch_all()
     while True:
-        time.sleep(SCRAPE_INTERVAL)
-        scrape_all_channels()
+        time.sleep(POLL_INTERVAL)
+        fetch_all()
 
 
 # ── Startup ───────────────────────────────────────────────────────────────────
 
-threading.Thread(target=_scrape_loop, daemon=True).start()
+threading.Thread(target=_fetch_loop, daemon=True).start()
 
 if __name__ == "__main__":
     print(f"Rodando na porta {PORT}")

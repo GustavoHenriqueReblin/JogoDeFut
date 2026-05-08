@@ -14,3 +14,4 @@ htmlcov/
 instance/
 *.log
 domains.txt
+/.claude
