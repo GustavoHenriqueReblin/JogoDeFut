@@ -4,4 +4,3 @@ gunicorn
 python-dotenv
 requests
 playwright
-playwright-stealth

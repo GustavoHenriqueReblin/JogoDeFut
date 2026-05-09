@@ -1,6 +1,5 @@
 import os, base64, time
 from playwright.sync_api import sync_playwright # type: ignore
-from playwright_stealth import stealth_sync # type: ignore
 
 DOMAIN = os.environ.get("SCRAPER_DOMAIN", "")
 
@@ -29,9 +28,19 @@ def _launch(playwright):
     return browser, ctx
 
 
+_STEALTH_SCRIPT = """
+Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
+Object.defineProperty(navigator, 'plugins', {get: () => [1,2,3,4,5]});
+Object.defineProperty(navigator, 'languages', {get: () => ['pt-BR','pt','en-US','en']});
+window.chrome = {runtime: {}};
+Object.defineProperty(navigator, 'permissions', {
+  get: () => ({ query: (p) => Promise.resolve({state: p.name==='notifications'?'denied':'granted'}) })
+});
+"""
+
 def _new_page(ctx):
-    page = _new_page(ctx)
-    stealth_sync(page)
+    page = ctx.new_page()
+    page.add_init_script(_STEALTH_SCRIPT)
     return page
 
 
