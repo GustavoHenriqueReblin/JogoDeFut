@@ -1,247 +1,278 @@
 #!/usr/bin/env python3
-import os
-import sys
-import time
-import subprocess
-import threading
-import queue
-import json
+import os, json, time, threading, queue, urllib.parse
+
+from flask import Flask, render_template, request, Response, jsonify, send_from_directory, send_file
+from flask_cors import CORS
+import requests as http_req
+
+from scraper import scrape_listings, resolve_stream, debug_screenshot, debug_resolve, debug_scrape
 
 try:
     from dotenv import load_dotenv
     load_dotenv()
 except ImportError:
-    env_path = os.path.join(os.path.dirname(__file__), ".env")
-    if os.path.exists(env_path):
-        with open(env_path, encoding="utf-8") as f:
-            for line in f:
-                line = line.strip()
-                if not line or line.startswith("#") or "=" not in line:
-                    continue
-                key, value = line.split("=", 1)
-                os.environ.setdefault(key.strip(), value.strip())
-
-def install(pkg):
-    subprocess.run([sys.executable, "-m", "pip", "install", pkg],
-                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-
-try:
-    from flask import Flask, render_template, request, send_file, send_from_directory, Response, jsonify
-    from flask_cors import CORS
-    import requests as http_requests
-except ImportError:
-    print("Instalando dependências...")
-    install("flask")
-    install("flask-cors")
-    install("requests")
-    from flask import Flask, render_template, request, send_file, send_from_directory, Response, jsonify
-    from flask_cors import CORS
-    import requests as http_requests
+    pass
 
 app = Flask(__name__)
 CORS(app)
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-PORT = int(os.environ.get('PORT', 5000))
 
-# { "ESPN": {"embeds": [{"provider": "YouTube", "url": "..."}], "logo": "..."} }
-channels = {}
-_channels_lock = threading.Lock()
-_sse_clients = []
-_sse_lock = threading.Lock()
+BASE_DIR      = os.path.dirname(os.path.abspath(__file__))
+PORT          = int(os.environ.get("PORT", 5000))
+POLL_INTERVAL = int(os.environ.get("POLL_INTERVAL", 1800))
+DEBUG_KEY     = os.environ.get("DEBUG_KEY", "")
+
+listings  = {}
+_lock     = threading.Lock()
+_clients  = []
+_cli_lock = threading.Lock()
 
 
-# ── SSE ───────────────────────────────────────────────────────────────────────
+# ── SSE ──────────────────────────────────────────────────────────────────────
 
-def channels_payload():
-    with _channels_lock:
-        data = dict(channels)
-    return json.dumps(data)
-
-def _push_sse(msg):
-    dead = []
-    with _sse_lock:
-        for q in _sse_clients:
+def _push(msg):
+    with _cli_lock:
+        dead = []
+        for q in _clients:
             try:
                 q.put_nowait(msg)
             except Exception:
                 dead.append(q)
         for q in dead:
-            _sse_clients.remove(q)
+            _clients.remove(q)
 
-def notify_sse():
-    _push_sse(f"event: channels_updated\ndata: {channels_payload()}\n\n")
+def _notify():
+    with _lock:
+        data = dict(listings)
+    _push(f"event: listings_updated\ndata: {json.dumps(data, ensure_ascii=False)}\n\n")
 
-def log_sse(msg, t=""):
-    payload = json.dumps({"msg": msg, "t": t})
-    _push_sse(f"event: scrape_log\ndata: {payload}\n\n")
+def _log(msg, t=""):
+    _push(f"event: log\ndata: {json.dumps({'msg': msg, 't': t})}\n\n")
+
 
 @app.route("/events")
 def sse():
     def stream():
         q = queue.Queue()
-        with _sse_lock:
-            _sse_clients.append(q)
+        with _cli_lock:
+            _clients.append(q)
         try:
-            yield f"event: channels_updated\ndata: {channels_payload()}\n\n"
+            with _lock:
+                data = dict(listings)
+            yield f"event: listings_updated\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
             while True:
                 try:
                     yield q.get(timeout=25)
                 except queue.Empty:
                     yield ": ping\n\n"
         finally:
-            with _sse_lock:
-                if q in _sse_clients:
-                    _sse_clients.remove(q)
+            with _cli_lock:
+                if q in _clients:
+                    _clients.remove(q)
 
-    return Response(stream(), mimetype="text/event-stream",
-                    headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+    return Response(
+        stream(),
+        mimetype="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
 
 
-# ── Main routes ───────────────────────────────────────────────────────────────
+# ── Resolve ───────────────────────────────────────────────────────────────────
+
+@app.route("/resolve")
+def resolve():
+    url = request.args.get("url", "").strip()
+    if not url:
+        return jsonify({"error": "url obrigatória"}), 400
+    try:
+        return jsonify(resolve_stream(url))
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+# ── HLS Proxy ─────────────────────────────────────────────────────────────────
+
+_PROXY_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/124.0.0.0 Safari/537.36"
+    ),
+    "Accept": "*/*",
+}
+
+
+@app.route("/proxy/m3u8")
+def proxy_m3u8():
+    url     = request.args.get("url", "")
+    referer = request.args.get("ref", "")
+    if not url:
+        return "url obrigatória", 400
+
+    headers = dict(_PROXY_HEADERS)
+    if referer:
+        headers["Referer"] = referer
+        headers["Origin"]  = referer.rstrip("/").rsplit("/", 1)[0]
+
+    try:
+        r = http_req.get(url, headers=headers, timeout=10)
+        r.raise_for_status()
+
+        lines = []
+        for line in r.text.splitlines():
+            stripped = line.strip()
+            if stripped and not stripped.startswith("#"):
+                seg = stripped if stripped.startswith("http") else urllib.parse.urljoin(url, stripped)
+                line = "/proxy/ts?url=" + urllib.parse.quote(seg, safe="")
+            lines.append(line)
+
+        return Response(
+            "\n".join(lines),
+            mimetype="application/vnd.apple.mpegurl",
+            headers={"Access-Control-Allow-Origin": "*", "Cache-Control": "no-cache"},
+        )
+    except Exception as e:
+        return str(e), 502
+
+
+@app.route("/proxy/ts")
+def proxy_ts():
+    url = urllib.parse.unquote(request.args.get("url", ""))
+    if not url:
+        return "url obrigatória", 400
+    try:
+        r = http_req.get(url, headers=_PROXY_HEADERS, timeout=20, stream=True)
+        r.raise_for_status()
+
+        def generate():
+            for chunk in r.iter_content(chunk_size=65536):
+                yield chunk
+
+        return Response(
+            generate(),
+            mimetype="video/mp2t",
+            headers={"Access-Control-Allow-Origin": "*", "Cache-Control": "max-age=30"},
+        )
+    except Exception as e:
+        return str(e), 502
+
+
+# ── Debug ─────────────────────────────────────────────────────────────────────
+
+def _check_debug_key():
+    if not DEBUG_KEY:
+        return "DEBUG_KEY não configurado no .env", 403
+    if request.args.get("key") != DEBUG_KEY:
+        return "chave inválida", 403
+    return None
+
+
+@app.route("/debug/screenshot")
+def debug_route_screenshot():
+    err = _check_debug_key()
+    if err:
+        return err
+
+    url = request.args.get("url", "").strip()
+    if not url:
+        return "parâmetro url obrigatório", 400
+
+    try:
+        png = debug_screenshot(url)
+        return Response(png, mimetype="image/png")
+    except Exception as e:
+        return str(e), 500
+
+
+@app.route("/debug/resolve")
+def debug_route_resolve():
+    err = _check_debug_key()
+    if err:
+        return err
+
+    url = request.args.get("url", "").strip()
+    if not url:
+        return "parâmetro url obrigatório", 400
+
+    try:
+        return jsonify(debug_resolve(url))
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/debug/scrape")
+def debug_route_scrape():
+    err = _check_debug_key()
+    if err:
+        return err
+
+    try:
+        data = debug_scrape()
+        # Retorna página HTML com o screenshot embutido + JSON dos dados
+        screenshot = data.pop("screenshot_base64", None)
+        html = f"""<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8"/>
+  <title>Debug — Scrape</title>
+  <style>
+    body{{font-family:monospace;background:#0a0a0f;color:#e8e8f0;padding:24px;margin:0}}
+    h2{{color:#e8ff47;margin-bottom:12px}}
+    img{{max-width:100%;border:1px solid #1e1e2e;border-radius:8px;margin-bottom:24px}}
+    pre{{background:#111118;border:1px solid #1e1e2e;border-radius:8px;padding:16px;
+         overflow:auto;font-size:.8rem;white-space:pre-wrap;word-break:break-all}}
+  </style>
+</head>
+<body>
+  <h2>Screenshot</h2>
+  {"<img src='data:image/png;base64," + screenshot + "'/>" if screenshot else "<p>sem screenshot</p>"}
+  <h2>Dados encontrados</h2>
+  <pre>{json.dumps(data, ensure_ascii=False, indent=2)}</pre>
+</body>
+</html>"""
+        return Response(html, mimetype="text/html")
+    except Exception as e:
+        return str(e), 500
+
+
+# ── Static ────────────────────────────────────────────────────────────────────
 
 @app.route("/")
 def index():
-    show_log = 'showLog' in request.args
-    return render_template("player.html", show_log=show_log)
+    return render_template("player.html", show_log="showLog" in request.args)
 
 @app.route("/manifest.json")
 def manifest():
-    return send_from_directory(BASE_DIR, 'manifest.json', mimetype='application/manifest+json')
+    return send_from_directory(BASE_DIR, "manifest.json", mimetype="application/manifest+json")
 
 @app.route("/sw.js")
-def sw():
-    return send_from_directory(BASE_DIR, 'sw.js', mimetype='application/javascript')
+def sw_js():
+    return send_from_directory(BASE_DIR, "sw.js", mimetype="application/javascript")
 
 @app.route("/favicon.ico")
 def favicon():
     return send_file(os.path.join(BASE_DIR, "static", "icons", "logo-48.png"), mimetype="image/png")
 
-@app.route("/debug")
-def debug():
-    results = {}
-    for path in ["/channels?category=Futebol", "/sports?category=Futebol&status=live"]:
-        url = f"{URL_BASE}{path}"
-        try:
-            r = http_requests.get(url, headers=_HEADERS, timeout=10)
-            results[path] = {"status": r.status_code, "ok": r.ok, "body": r.json()}
-        except Exception as e:
-            results[path] = {"error": type(e).__name__, "detail": str(e)}
-    return jsonify({"url_base": URL_BASE, "results": results})
 
+# ── Background scraper ────────────────────────────────────────────────────────
 
-# ── API ──────────────────────────────────────────────────────────
-
-URL_BASE = os.environ.get('URL_BASE', '')
-POLL_INTERVAL = int(os.environ.get('POLL_INTERVAL', 1800))
-
-_HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-    "Accept": "application/json, text/plain, */*",
-    "Accept-Language": "pt-BR,pt;q=0.9,en;q=0.8",
-    "Accept-Encoding": "gzip, deflate",
-    "Referer": URL_BASE + "/",
-    "Origin": URL_BASE + "/",
-    "Connection": "keep-alive",
-    "Sec-Fetch-Dest": "empty",
-    "Sec-Fetch-Mode": "cors",
-    "Sec-Fetch-Site": "same-site",
-}
-
-def _get(path):
-    url = f"{URL_BASE}{path}"
-    r = http_requests.get(url, headers=_HEADERS, timeout=10)
-    r.raise_for_status()
-    return r
-
-def _fetch_channels():
-    """Returns (result_dict, ok) where ok=False means the request itself failed."""
-    try:
-        r = _get("/channels?category=Esportes")
-        body = r.json()
-        items = body if isinstance(body, list) else body.get("data", [])
-        result = {}
-        for ch in items:
-            if not ch.get("is_active", True):
-                continue
-            name = ch.get("name") or ch.get("id", "")
-            embed = ch.get("embed_url", "")
-            if not name or not embed:
-                continue
-            result[name] = {
-                "embeds": [{"provider": "stream", "url": embed}],
-                "logo": ch.get("logo_url", ""),
-            }
-        log_sse(f"api: {len(result)} canal(is) de esportes encontrado(s)", "ok")
-        return result, True
-    except Exception as e:
-        log_sse(f"api: erro /channels — {type(e).__name__}: {str(e)[:120]}", "err")
-        return {}, False
-
-def _fetch_live_events():
-    """Returns (result_dict, ok) where ok=False means the request itself failed."""
-    try:
-        r = _get("/sports?category=Futebol&status=live")
-        body = r.json()
-        items = body if isinstance(body, list) else body.get("data", [])
-        result = {}
-        for ev in items:
-            name = ev.get("title") or ev.get("id", "")
-            embeds = [
-                {"provider": e.get("provider", f"Fonte {i+1}"), "url": e.get("embed_url", "")}
-                for i, e in enumerate(ev.get("embeds", []))
-                if e.get("embed_url")
-            ]
-            if not name or not embeds:
-                continue
-            result[name] = {
-                "embeds": embeds,
-                "logo": ev.get("poster", ""),
-            }
-        log_sse(f"api: {len(result)} evento(s) ao vivo encontrado(s)", "ok")
-        return result, True
-    except Exception as e:
-        log_sse(f"api: erro /sports — {type(e).__name__}: {str(e)[:120]}", "err")
-        return {}, False
-
-
-def fetch_all():
-    if not URL_BASE:
-        log_sse("api: URL_BASE não configurada no .env", "err")
-        return
-    log_sse("api: buscando canais e eventos ao vivo...", "inf")
-    ch, ch_ok = _fetch_channels()
-    ev, ev_ok = _fetch_live_events()
-    merged = {**ch, **ev}
-
-    if not ch_ok and not ev_ok:
-        log_sse("api: falha na requisição, mantendo dados anteriores", "warn")
-        return
-
-    if ev:
-        result = ev
-        log_sse(f"api: {len(ev)} evento(s) ao vivo carregado(s)", "inf")
-    elif ch:
-        result = ch
-        log_sse(f"api: sem jogos ao vivo — exibindo {len(ch)} canal(is) de esporte", "warn")
-    else:
-        result = {}
-        log_sse("api: nenhum canal ou evento disponível no momento", "warn")
-
-    with _channels_lock:
-        channels.clear()
-        channels.update(result)
-    notify_sse()
-
-def _fetch_loop():
-    fetch_all()
+def _scrape_loop():
     while True:
+        _log("buscando listagem...", "inf")
+        try:
+            data = scrape_listings()
+            with _lock:
+                listings.clear()
+                listings.update(data)
+            _notify()
+            games    = sum(1 for v in data.values() if v["type"] == "game")
+            channels = sum(1 for v in data.values() if v["type"] == "channel")
+            _log(f"{games} jogo(s) ao vivo · {channels} canal(is)", "ok")
+        except Exception as e:
+            _log(f"erro ao buscar listagem: {e}", "err")
         time.sleep(POLL_INTERVAL)
-        fetch_all()
 
 
-# ── Startup ───────────────────────────────────────────────────────────────────
-
-threading.Thread(target=_fetch_loop, daemon=True).start()
+threading.Thread(target=_scrape_loop, daemon=True).start()
 
 if __name__ == "__main__":
     print(f"Rodando na porta {PORT}")

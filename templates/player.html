@@ -10,8 +10,8 @@
   <link rel="icon" type="image/png" sizes="192x192" href="/static/icons/logo-192.png"/>
   <link rel="shortcut icon" href="/favicon.ico"/>
   <link rel="apple-touch-icon" href="/static/icons/logo-192.png"/>
-  <meta name="google-adsense-account" content="ca-pub-7138876950922476">
   <title>Gol AO VIVO TV</title>
+  <script src="https://cdn.jsdelivr.net/npm/hls.js@1/dist/hls.min.js"></script>
   <style>
     @import url('https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=Syne:wght@700;800&display=swap');
     *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
@@ -33,18 +33,30 @@
     }
     header{position:relative;z-index:1;text-align:center}
     header h1{font-size:1.8rem;font-weight:800;letter-spacing:-.03em;color:var(--accent)}
+
+    /* Player */
     .video-wrap{
       position:relative;z-index:1;width:100%;max-width:900px;
       aspect-ratio:16/9;background:#000;border-radius:12px;
       overflow:hidden;border:1px solid var(--border);
     }
-    #player{width:100%;height:100%;border:none;display:block}
-    .no-signal{
-      position:absolute;inset:0;display:flex;align-items:center;justify-content:center;
+    #player{width:100%;height:100%;display:block;background:#000}
+    .overlay{
+      position:absolute;inset:0;display:flex;flex-direction:column;
+      align-items:center;justify-content:center;gap:12px;
       font-family:'DM Mono',monospace;font-size:.85rem;color:var(--muted);
-      background:#000;
+      background:#000;pointer-events:none;transition:opacity .2s;
     }
-    .no-signal.hidden{display:none}
+    .overlay.hidden{opacity:0;pointer-events:none}
+    .spinner{
+      width:32px;height:32px;border:3px solid var(--border);
+      border-top-color:var(--accent2);border-radius:50%;
+      animation:spin .8s linear infinite;
+    }
+    @keyframes spin{to{transform:rotate(360deg)}}
+    .overlay-msg{color:var(--muted)}
+
+    /* Provider bar */
     .provider-bar{
       position:relative;z-index:1;width:100%;max-width:900px;
       background:var(--surface);border:1px solid var(--border);
@@ -61,164 +73,249 @@
     .prov-btn:hover,.fs-btn:hover{border-color:var(--accent2);color:var(--accent2)}
     .prov-btn.active{border-color:var(--accent2);color:var(--accent2);background:rgba(71,255,232,.07)}
     .fs-btn{margin-left:auto}
-    .channels{
+
+    /* Listings */
+    .section{
       position:relative;z-index:1;width:100%;max-width:900px;
       background:var(--surface);border:1px solid var(--border);
       border-radius:10px;padding:14px 16px;display:flex;flex-direction:column;gap:10px;
     }
-    .channels-title{font-family:'DM Mono',monospace;font-size:.62rem;color:var(--muted);letter-spacing:.1em;text-transform:uppercase}
-    .channels-list{display:flex;flex-wrap:wrap;gap:8px}
-    .ch-btn{
+    .section-title{font-family:'DM Mono',monospace;font-size:.62rem;color:var(--muted);letter-spacing:.1em;text-transform:uppercase}
+    .btn-list{display:flex;flex-wrap:wrap;gap:8px}
+    .item-btn{
       background:transparent;border:1px solid var(--border);color:var(--text);
       font-family:'DM Mono',monospace;font-size:.78rem;font-weight:500;
       border-radius:6px;padding:7px 14px;cursor:pointer;transition:all .15s;
     }
-    .ch-btn:hover{border-color:var(--accent);color:var(--accent)}
-    .ch-btn.active{border-color:var(--accent);color:#000;background:var(--accent)}
-    .ch-empty{font-family:'DM Mono',monospace;font-size:.72rem;color:var(--muted)}
+    .item-btn:hover{border-color:var(--accent);color:var(--accent)}
+    .item-btn.active{border-color:var(--accent);color:#000;background:var(--accent)}
+    .item-btn:disabled{opacity:.4;cursor:wait}
+    .empty{font-family:'DM Mono',monospace;font-size:.72rem;color:var(--muted)}
+
+    /* Log */
     .log{
       position:relative;z-index:1;width:100%;max-width:900px;
       background:var(--surface);border:1px solid var(--border);
       border-radius:10px;padding:12px 16px;max-height:150px;overflow-y:auto;
     }
     .ll{font-family:'DM Mono',monospace;font-size:.72rem;padding:2px 0;border-bottom:1px solid #15151f;color:var(--muted);animation:fi .2s ease}
-    .ll.ok{color:var(--accent)} .ll.err{color:var(--error)} .ll.inf{color:var(--accent2)} .ll.warn{color:var(--warn)}
+    .ll.ok{color:var(--accent)}.ll.err{color:var(--error)}.ll.inf{color:var(--accent2)}.ll.warn{color:var(--warn)}
     @keyframes fi{from{opacity:0;transform:translateY(3px)}to{opacity:1}}
-    ::-webkit-scrollbar{width:4px} ::-webkit-scrollbar-thumb{background:var(--border);border-radius:4px}
+    ::-webkit-scrollbar{width:4px}::-webkit-scrollbar-thumb{background:var(--border);border-radius:4px}
   </style>
 </head>
 <body class="{{ 'show-log' if show_log else 'compact' }}">
+
 <header>
   <h1>⚽ GOL AO VIVO TV</h1>
 </header>
 
 <div class="video-wrap">
-  <iframe id="player" src="about:blank"
-          allowfullscreen
-          allow="autoplay; encrypted-media; fullscreen; picture-in-picture"
-          referrerpolicy="no-referrer"></iframe>
-  <div class="no-signal" id="no-signal">Selecione um canal</div>
+  <video id="player" controls playsinline></video>
+  <div class="overlay" id="overlay">
+    <div class="spinner" id="spinner" style="display:none"></div>
+    <span class="overlay-msg" id="overlay-msg">Selecione um jogo ou canal</span>
+  </div>
 </div>
 
 <div class="provider-bar" id="provider-bar">
-  <span class="provider-label">Canais: </span>
+  <span class="provider-label">Fonte:</span>
   <div id="provider-list" style="display:flex;gap:8px;flex-wrap:wrap"></div>
   <button class="fs-btn" onclick="toggleFullscreen()">⛶ TELA CHEIA</button>
 </div>
 
-<div class="channels" id="channels-wrap">
-  <div class="channels-title">Jogos disponíveis</div>
-  <div class="channels-list" id="channels-list">
-    <span class="ch-empty">Buscando jogos...</span>
+<div class="section" id="games-section">
+  <div class="section-title">Jogos ao vivo</div>
+  <div class="btn-list" id="games-list">
+    <span class="empty">Buscando jogos...</span>
+  </div>
+</div>
+
+<div class="section" id="channels-section">
+  <div class="section-title">Canais</div>
+  <div class="btn-list" id="channels-list">
+    <span class="empty">Buscando canais...</span>
   </div>
 </div>
 
 <div class="log" id="log"></div>
 
 <script>
-let activeChannel = null;
-let autoStartDone = false;
-let channelMap = {};
-
-if('serviceWorker' in navigator){
-  navigator.serviceWorker.register('/sw.js').catch(()=>{});
+if ('serviceWorker' in navigator) {
+  navigator.serviceWorker.register('/sw.js').catch(() => {});
 }
 
-function log(msg, t=""){
-  const d = document.getElementById("log");
-  const l = document.createElement("div");
-  l.className = "ll " + t;
-  l.textContent = "[" + new Date().toLocaleTimeString() + "] " + msg;
+const video    = document.getElementById('player');
+const overlay  = document.getElementById('overlay');
+const spinner  = document.getElementById('spinner');
+const overlayMsg = document.getElementById('overlay-msg');
+
+let hls = null;
+let activeKey = null;
+let autoStartDone = false;
+
+function log(msg, t = '') {
+  const d = document.getElementById('log');
+  const l = document.createElement('div');
+  l.className = 'll ' + t;
+  l.textContent = '[' + new Date().toLocaleTimeString() + '] ' + msg;
   d.appendChild(l);
   d.scrollTop = d.scrollHeight;
 }
 
-function loadEmbed(url, provBtns, idx){
-  document.getElementById("player").src = url;
-  document.getElementById("no-signal").classList.add("hidden");
-  provBtns.forEach((b, i) => b.classList.toggle("active", i === idx));
+function showOverlay(msg, loading = false) {
+  overlay.classList.remove('hidden');
+  overlayMsg.textContent = msg;
+  spinner.style.display = loading ? 'block' : 'none';
 }
 
-function selectChannel(name){
-  const ch = channelMap[name];
-  if(!ch) return;
+function hideOverlay() {
+  overlay.classList.add('hidden');
+  spinner.style.display = 'none';
+}
 
-  activeChannel = name;
-  document.querySelectorAll(".ch-btn").forEach(b =>
-    b.classList.toggle("active", b.dataset.name === name)
-  );
+function playStream(url, referer) {
+  if (hls) { hls.destroy(); hls = null; }
+  video.src = '';
 
-  const bar = document.getElementById("provider-bar");
-  const list = document.getElementById("provider-list");
-  list.innerHTML = "";
+  const proxyUrl = '/proxy/m3u8?url=' + encodeURIComponent(url)
+    + (referer ? '&ref=' + encodeURIComponent(referer) : '');
 
-  const provBtns = [];
-  if(ch.embeds.length > 1){
-    ch.embeds.forEach((e, i) => {
-      const btn = document.createElement("button");
-      btn.className = "prov-btn";
-      btn.textContent = e.provider || ("Fonte " + (i + 1));
-      btn.onclick = () => loadEmbed(e.url, provBtns, i);
-      list.appendChild(btn);
-      provBtns.push(btn);
+  if (Hls.isSupported()) {
+    hls = new Hls({ enableWorker: false });
+    hls.loadSource(proxyUrl);
+    hls.attachMedia(video);
+    hls.on(Hls.Events.MANIFEST_PARSED, () => {
+      hideOverlay();
+      video.play().catch(() => {});
     });
-    bar.classList.add("visible");
+    hls.on(Hls.Events.ERROR, (_, data) => {
+      if (data.fatal) {
+        showOverlay('Erro no stream');
+        log('hls error: ' + data.details, 'err');
+      }
+    });
+  } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
+    video.src = proxyUrl;
+    video.addEventListener('loadedmetadata', () => {
+      hideOverlay();
+      video.play().catch(() => {});
+    }, { once: true });
   } else {
-    bar.classList.remove("visible");
+    showOverlay('HLS não suportado neste browser');
   }
-
-  loadEmbed(ch.embeds[0].url, provBtns, 0);
-  log("Canal: " + name, "inf");
 }
 
-function renderChannels(data){
-  channelMap = data;
-  const container = document.getElementById("channels-list");
-  container.innerHTML = "";
-  const entries = Object.entries(data);
+function buildProviderBar(streams) {
+  const bar  = document.getElementById('provider-bar');
+  const list = document.getElementById('provider-list');
+  list.innerHTML = '';
 
-  if(entries.length === 0){
-    autoStartDone = true;
-    container.innerHTML = '<span class="ch-empty">Nenhum canal disponível no momento</span>';
+  if (streams.length <= 1) {
+    bar.classList.remove('visible');
     return;
   }
 
-  entries.forEach(([name]) => {
-    const btn = document.createElement("button");
-    btn.className = "ch-btn" + (name === activeChannel ? " active" : "");
-    btn.textContent = name;
-    btn.dataset.name = name;
-    btn.onclick = () => selectChannel(name);
-    container.appendChild(btn);
+  const btns = streams.map((s, i) => {
+    const btn = document.createElement('button');
+    btn.className = 'prov-btn';
+    btn.textContent = s.provider || ('Opção ' + (i + 1));
+    btn.onclick = () => {
+      btns.forEach((b, j) => b.classList.toggle('active', j === i));
+      showOverlay('Carregando...', true);
+      playStream(s.url, s.referer);
+      log('fonte: ' + (s.provider || 'opção ' + (i + 1)), 'inf');
+    };
+    list.appendChild(btn);
+    return btn;
   });
+  btns[0].classList.add('active');
+  bar.classList.add('visible');
+}
 
-  log(entries.length + " canal(is) disponível(is)", "ok");
+async function selectItem(key, url) {
+  document.querySelectorAll('.item-btn').forEach(b => {
+    b.classList.toggle('active', b.dataset.key === key);
+    b.disabled = b.dataset.key === key;
+  });
+  activeKey = key;
 
-  if(!autoStartDone){
-    autoStartDone = true;
-    const first = container.querySelector(".ch-btn");
-    if(first) first.click();
+  showOverlay('Resolvendo stream…', true);
+  log('resolvendo: ' + key, 'inf');
+
+  try {
+    const res = await fetch('/resolve?url=' + encodeURIComponent(url));
+    const data = await res.json();
+
+    if (data.error) throw new Error(data.error);
+    if (!data.streams || data.streams.length === 0) throw new Error('nenhum stream encontrado');
+
+    buildProviderBar(data.streams);
+    playStream(data.streams[0].url, data.streams[0].referer);
+    log(data.streams.length + ' fonte(s) encontrada(s) para ' + key, 'ok');
+  } catch (e) {
+    showOverlay('Falha ao resolver stream');
+    log('erro: ' + e.message, 'err');
+  } finally {
+    document.querySelectorAll('.item-btn').forEach(b => { b.disabled = false; });
   }
 }
 
-function toggleFullscreen(){
-  const wrap = document.querySelector(".video-wrap");
-  if(document.fullscreenElement){
+function renderListings(data) {
+  const games    = Object.entries(data).filter(([, v]) => v.type === 'game');
+  const channels = Object.entries(data).filter(([, v]) => v.type === 'channel');
+
+  function fillList(containerId, items) {
+    const el = document.getElementById(containerId);
+    el.innerHTML = '';
+    if (items.length === 0) {
+      el.innerHTML = '<span class="empty">Nenhum disponível</span>';
+      return;
+    }
+    items.forEach(([name, info]) => {
+      const btn = document.createElement('button');
+      btn.className = 'item-btn' + (name === activeKey ? ' active' : '');
+      btn.textContent = name;
+      btn.dataset.key = name;
+      btn.onclick = () => selectItem(name, info.url);
+      el.appendChild(btn);
+    });
+  }
+
+  fillList('games-list', games);
+  fillList('channels-list', channels);
+
+  log(games.length + ' jogo(s) · ' + channels.length + ' canal(is)', 'ok');
+
+  if (!autoStartDone && games.length > 0) {
+    autoStartDone = true;
+    const [name, info] = games[0];
+    selectItem(name, info.url);
+  } else if (!autoStartDone && channels.length > 0) {
+    autoStartDone = true;
+    const [name, info] = channels[0];
+    selectItem(name, info.url);
+  }
+}
+
+function toggleFullscreen() {
+  const wrap = document.querySelector('.video-wrap');
+  if (document.fullscreenElement) {
     document.exitFullscreen();
   } else {
     (wrap.requestFullscreen || wrap.webkitRequestFullscreen).call(wrap);
   }
 }
 
-(function connectSSE(){
-  const es = new EventSource("/events");
-  es.addEventListener("channels_updated", e => {
-    try { renderChannels(JSON.parse(e.data)); }
-    catch(err) { console.error("SSE parse error", err); }
+(function connectSSE() {
+  const es = new EventSource('/events');
+  es.addEventListener('listings_updated', e => {
+    try { renderListings(JSON.parse(e.data)); }
+    catch (err) { console.error('SSE parse error', err); }
   });
-  es.addEventListener("scrape_log", e => {
+  es.addEventListener('log', e => {
     try { const d = JSON.parse(e.data); log(d.msg, d.t); }
-    catch(err) {}
+    catch (_) {}
   });
   es.onerror = () => { es.close(); setTimeout(connectSSE, 5000); };
 })();
