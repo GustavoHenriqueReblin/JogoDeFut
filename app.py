@@ -85,11 +85,21 @@ def sse():
 @app.route("/resolve")
 def resolve():
     url = request.args.get("url", "").strip()
+    name = request.args.get("name", url).strip()
     if not url:
         return jsonify({"error": "url obrigatória"}), 400
+    _log(f"resolvendo: {name}", "inf")
     try:
-        return jsonify(resolve_stream(url))
+        result = resolve_stream(url)
+        n = len(result.get("streams", []))
+        if n:
+            providers = ", ".join(s["provider"] for s in result["streams"])
+            _log(f"✓ {n} stream(s) encontrado(s) — {providers}", "ok")
+        else:
+            _log(f"✗ nenhum stream encontrado para: {name}", "err")
+        return jsonify(result)
     except Exception as e:
+        _log(f"✗ erro ao resolver '{name}': {e}", "err")
         return jsonify({"error": str(e)}), 500
 
 

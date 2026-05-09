@@ -241,10 +241,9 @@ async function selectItem(key, url) {
   activeKey = key;
 
   showOverlay('Resolvendo stream…', true);
-  log('resolvendo: ' + key, 'inf');
 
   try {
-    const res = await fetch('/resolve?url=' + encodeURIComponent(url));
+    const res = await fetch('/resolve?url=' + encodeURIComponent(url) + '&name=' + encodeURIComponent(key));
     const data = await res.json();
 
     if (data.error) throw new Error(data.error);
