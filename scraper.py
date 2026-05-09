@@ -1,4 +1,4 @@
-import os, base64
+import os, base64, time
 from playwright.sync_api import sync_playwright # type: ignore
 
 DOMAIN = os.environ.get("SCRAPER_DOMAIN", "")
@@ -129,6 +129,78 @@ def _find_m3u8(ctx, src_url):
         page.close()
 
     return found[0] if found else None
+
+
+# ── Debug live stream ─────────────────────────────────────────────────────────
+
+def debug_live_frames(url, duration=60):
+    """Yields JPEG screenshot bytes every 500 ms while browsing url."""
+    with sync_playwright() as p:
+        browser, ctx = _launch(p)
+        page = ctx.new_page()
+        _block_ads(page)
+        try:
+            page.goto(url, timeout=30000, wait_until="domcontentloaded")
+            page.wait_for_timeout(1000)
+            page.evaluate("() => { const el = document.getElementById('dontfoid'); if (el) el.remove(); }")
+            deadline = time.time() + duration
+            while time.time() < deadline:
+                yield page.screenshot(type="jpeg", quality=55, full_page=False)
+                time.sleep(0.5)
+        finally:
+            browser.close()
+
+
+def debug_live_resolve_frames(page_url, duration=90):
+    """Yields JPEG frames while running the full resolve flow so you can watch each step."""
+    with sync_playwright() as p:
+        browser, ctx = _launch(p)
+        try:
+            # Step 1 – open game page
+            page = ctx.new_page()
+            _block_ads(page)
+            page.goto(page_url, timeout=30000, wait_until="domcontentloaded")
+            page.wait_for_timeout(1000)
+            page.evaluate("() => { const el = document.getElementById('dontfoid'); if (el) el.remove(); }")
+            yield page.screenshot(type="jpeg", quality=55, full_page=False)
+
+            sources = []
+            for btn in page.query_selector_all(".btn-player .btn-style"):
+                src = btn.get_attribute("data-src") or ""
+                label = btn.inner_text().strip() or f"Opção {len(sources) + 1}"
+                if src:
+                    sources.append({"label": label, "src": src})
+            page.close()
+
+            # Step 2 – visit each source page
+            deadline = time.time() + duration
+            for source in sources[:4]:
+                if time.time() >= deadline:
+                    break
+                found = []
+                inner = ctx.new_page()
+
+                def on_response(r, _f=found):
+                    if _f:
+                        return
+                    try:
+                        if r.status == 200 and r.body().lstrip()[:7] == b"#EXTM3U":
+                            _f.append(r.url)
+                    except Exception:
+                        pass
+
+                inner.on("response", on_response)
+                inner.goto(source["src"], timeout=15000, wait_until="domcontentloaded")
+
+                for _ in range(24):
+                    if found or time.time() >= deadline:
+                        break
+                    yield inner.screenshot(type="jpeg", quality=55, full_page=False)
+                    time.sleep(0.5)
+
+                inner.close()
+        finally:
+            browser.close()
 
 
 # ── Debug helpers ─────────────────────────────────────────────────────────────

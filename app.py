@@ -5,7 +5,11 @@ from flask import Flask, render_template, request, Response, jsonify, send_from_
 from flask_cors import CORS
 import requests as http_req
 
-from scraper import scrape_listings, resolve_stream, debug_screenshot, debug_resolve, debug_scrape
+from scraper import (
+    scrape_listings, resolve_stream,
+    debug_screenshot, debug_resolve, debug_scrape,
+    debug_live_frames, debug_live_resolve_frames,
+)
 
 try:
     from dotenv import load_dotenv
@@ -197,6 +201,69 @@ def debug_route_resolve():
         return jsonify(debug_resolve(url))
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+
+
+@app.route("/debug/live")
+def debug_route_live():
+    err = _check_debug_key()
+    if err:
+        return err
+
+    url = request.args.get("url", "").strip()
+    if not url:
+        # HTML helper page
+        html = """<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8"/>
+  <title>Debug — Live View</title>
+  <style>
+    body{font-family:monospace;background:#0a0a0f;color:#e8e8f0;padding:24px;margin:0}
+    h2{color:#e8ff47}
+    input{width:60%;padding:8px;background:#111118;border:1px solid #333;color:#e8e8f0;border-radius:4px}
+    button{padding:8px 16px;background:#e8ff47;color:#0a0a0f;border:none;border-radius:4px;cursor:pointer;margin-left:8px}
+    label{display:block;margin:12px 0 4px}
+    #frame{margin-top:20px;max-width:100%;border:1px solid #1e1e2e;border-radius:8px}
+  </style>
+</head>
+<body>
+  <h2>Live View — Playwright</h2>
+  <label>URL da página</label>
+  <input id="url" placeholder="https://..."/>
+  <button onclick="watch(false)">Assistir</button>
+  <button onclick="watch(true)">Assistir + Resolve</button>
+  <img id="frame" src="" alt="aguardando..."/>
+  <script>
+    function watch(resolve) {
+      const url = document.getElementById('url').value.trim();
+      if (!url) return;
+      const key = new URLSearchParams(location.search).get('key') || '';
+      const src = '/debug/live?url=' + encodeURIComponent(url)
+                + '&key=' + encodeURIComponent(key)
+                + (resolve ? '&resolve=1' : '');
+      document.getElementById('frame').src = src;
+    }
+  </script>
+</body>
+</html>"""
+        return Response(html, mimetype="text/html")
+
+    resolve_mode = request.args.get("resolve") == "1"
+    gen = debug_live_resolve_frames(url) if resolve_mode else debug_live_frames(url)
+
+    def mjpeg():
+        boundary = b"--frame\r\nContent-Type: image/jpeg\r\n\r\n"
+        try:
+            for frame in gen:
+                yield boundary + frame + b"\r\n"
+        except Exception:
+            pass
+
+    return Response(
+        mjpeg(),
+        mimetype="multipart/x-mixed-replace; boundary=frame",
+        headers={"Cache-Control": "no-cache"},
+    )
 
 
 @app.route("/debug/scrape")
