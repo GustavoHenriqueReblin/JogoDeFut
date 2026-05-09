@@ -154,6 +154,7 @@ def _get(path):
     return r
 
 def _fetch_channels():
+    """Returns (result_dict, ok) where ok=False means the request itself failed."""
     try:
         r = _get("/channels?category=Futebol")
         body = r.json()
@@ -171,12 +172,13 @@ def _fetch_channels():
                 "logo": ch.get("logo_url", ""),
             }
         log_sse(f"api: {len(result)} canal(is) de futebol encontrado(s)", "ok")
-        return result
+        return result, True
     except Exception as e:
         log_sse(f"api: erro /channels — {type(e).__name__}: {str(e)[:120]}", "err")
-        return {}
+        return {}, False
 
 def _fetch_live_events():
+    """Returns (result_dict, ok) where ok=False means the request itself failed."""
     try:
         r = _get("/sports?category=Futebol&status=live")
         body = r.json()
@@ -196,10 +198,10 @@ def _fetch_live_events():
                 "logo": ev.get("poster", ""),
             }
         log_sse(f"api: {len(result)} evento(s) ao vivo encontrado(s)", "ok")
-        return result
+        return result, True
     except Exception as e:
         log_sse(f"api: erro /sports — {type(e).__name__}: {str(e)[:120]}", "err")
-        return {}
+        return {}, False
 
 
 def fetch_all():
@@ -207,17 +209,25 @@ def fetch_all():
         log_sse("api: URL_BASE não configurada no .env", "err")
         return
     log_sse("api: buscando canais e eventos ao vivo...", "inf")
-    ch = _fetch_channels()
-    ev = _fetch_live_events()
+    ch, ch_ok = _fetch_channels()
+    ev, ev_ok = _fetch_live_events()
     merged = {**ch, **ev}
+
     if merged:
         with _channels_lock:
             channels.clear()
             channels.update(merged)
         notify_sse()
         log_sse(f"api: total {len(merged)} canal(is)/evento(s) carregado(s)", "inf")
+    elif ch_ok and ev_ok:
+        # API respondeu com sucesso mas não há jogos ao vivo — limpa a lista
+        with _channels_lock:
+            channels.clear()
+        notify_sse()
+        log_sse("api: nenhum jogo ao vivo no momento", "warn")
     else:
-        log_sse("api: nenhum resultado encontrado", "warn")
+        # Ao menos uma requisição falhou — mantém dados anteriores para não sumir tudo
+        log_sse("api: falha na requisição, mantendo dados anteriores", "warn")
 
 def _fetch_loop():
     fetch_all()
