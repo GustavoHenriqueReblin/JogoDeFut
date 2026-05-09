@@ -213,21 +213,24 @@ def fetch_all():
     ev, ev_ok = _fetch_live_events()
     merged = {**ch, **ev}
 
-    if merged:
-        with _channels_lock:
-            channels.clear()
-            channels.update(merged)
-        notify_sse()
-        log_sse(f"api: total {len(merged)} canal(is)/evento(s) carregado(s)", "inf")
-    elif ch_ok and ev_ok:
-        # API respondeu com sucesso mas não há jogos ao vivo — limpa a lista
-        with _channels_lock:
-            channels.clear()
-        notify_sse()
-        log_sse("api: nenhum jogo ao vivo no momento", "warn")
-    else:
-        # Ao menos uma requisição falhou — mantém dados anteriores para não sumir tudo
+    if not ch_ok and not ev_ok:
         log_sse("api: falha na requisição, mantendo dados anteriores", "warn")
+        return
+
+    if ev:
+        result = ev
+        log_sse(f"api: {len(ev)} evento(s) ao vivo carregado(s)", "inf")
+    elif ch:
+        result = ch
+        log_sse(f"api: sem jogos ao vivo — exibindo {len(ch)} canal(is) de esporte", "warn")
+    else:
+        result = {}
+        log_sse("api: nenhum canal ou evento disponível no momento", "warn")
+
+    with _channels_lock:
+        channels.clear()
+        channels.update(result)
+    notify_sse()
 
 def _fetch_loop():
     fetch_all()
