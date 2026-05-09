@@ -156,7 +156,7 @@ def _get(path):
 def _fetch_channels():
     """Returns (result_dict, ok) where ok=False means the request itself failed."""
     try:
-        r = _get("/channels?category=Futebol")
+        r = _get("/channels?category=Esportes")
         body = r.json()
         items = body if isinstance(body, list) else body.get("data", [])
         result = {}
@@ -171,7 +171,7 @@ def _fetch_channels():
                 "embeds": [{"provider": "stream", "url": embed}],
                 "logo": ch.get("logo_url", ""),
             }
-        log_sse(f"api: {len(result)} canal(is) de futebol encontrado(s)", "ok")
+        log_sse(f"api: {len(result)} canal(is) de esportes encontrado(s)", "ok")
         return result, True
     except Exception as e:
         log_sse(f"api: erro /channels — {type(e).__name__}: {str(e)[:120]}", "err")
