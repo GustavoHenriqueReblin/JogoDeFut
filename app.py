@@ -197,6 +197,55 @@ def debug_route_screenshot():
         return str(e), 500
 
 
+@app.route("/debug/html")
+def debug_route_html():
+    err = _check_debug_key()
+    if err:
+        return err
+
+    url = request.args.get("url", "").strip()
+    if not url:
+        return "parâmetro url obrigatório", 400
+
+    try:
+        r = http_req.get(url, headers=_PROXY_HEADERS, timeout=15)
+        escaped = r.text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+        html = f"""<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8"/>
+  <title>Debug — HTML bruto</title>
+  <style>
+    body{{font-family:monospace;background:#0a0a0f;color:#e8e8f0;padding:24px;margin:0}}
+    h2{{color:#e8ff47}}
+    .meta{{color:#888;margin-bottom:16px;font-size:.85rem}}
+    pre{{background:#111118;border:1px solid #1e1e2e;border-radius:8px;padding:16px;
+         overflow:auto;font-size:.75rem;white-space:pre-wrap;word-break:break-all}}
+    .hl{{background:#e8ff4733;border-radius:2px}}
+  </style>
+</head>
+<body>
+  <h2>HTML bruto — sem JS</h2>
+  <div class="meta">
+    URL: {url}<br>
+    Status: {r.status_code} · Content-Type: {r.headers.get('content-type','?')} · {len(r.text)} chars
+  </div>
+  <pre id="src">{escaped}</pre>
+  <script>
+    // destaca URLs que parecem m3u8 ou style.css suspeitos
+    const pre = document.getElementById('src');
+    pre.innerHTML = pre.innerHTML.replace(
+      /(https?:\/\/[^\s"'<>]+(?:\.m3u8|style\.css|\.m3u)[^\s"'<>]*)/g,
+      '<mark class="hl">$1</mark>'
+    );
+  </script>
+</body>
+</html>"""
+        return Response(html, mimetype="text/html")
+    except Exception as e:
+        return str(e), 502
+
+
 @app.route("/debug/resolve")
 def debug_route_resolve():
     err = _check_debug_key()
