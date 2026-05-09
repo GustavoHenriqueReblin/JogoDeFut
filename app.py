@@ -1,6 +1,12 @@
 #!/usr/bin/env python3
 import os, json, time, threading, queue, urllib.parse
 
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
+
 from flask import Flask, render_template, request, Response, jsonify, send_from_directory, send_file
 from flask_cors import CORS
 import requests as http_req
@@ -10,12 +16,6 @@ from scraper import (
     debug_screenshot, debug_resolve, debug_scrape,
     debug_live_frames, debug_live_resolve_frames,
 )
-
-try:
-    from dotenv import load_dotenv
-    load_dotenv()
-except ImportError:
-    pass
 
 app = Flask(__name__)
 CORS(app)
