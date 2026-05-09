@@ -1,5 +1,6 @@
 import os, base64, time
 from playwright.sync_api import sync_playwright # type: ignore
+from playwright_stealth import stealth_sync # type: ignore
 
 DOMAIN = os.environ.get("SCRAPER_DOMAIN", "")
 
@@ -28,6 +29,12 @@ def _launch(playwright):
     return browser, ctx
 
 
+def _new_page(ctx):
+    page = _new_page(ctx)
+    stealth_sync(page)
+    return page
+
+
 def _block_ads(page):
     def handler(route):
         if any(d in route.request.url for d in _AD_DOMAINS):
@@ -44,7 +51,7 @@ def scrape_listings():
     results = {}
     with sync_playwright() as p:
         browser, ctx = _launch(p)
-        page = ctx.new_page()
+        page = _new_page(ctx)
         _block_ads(page)
         try:
             page.goto(DOMAIN, timeout=30000, wait_until="domcontentloaded")
@@ -73,7 +80,7 @@ def resolve_stream(page_url):
     with sync_playwright() as p:
         browser, ctx = _launch(p)
         try:
-            page = ctx.new_page()
+            page = _new_page(ctx)
             _block_ads(page)
             page.goto(page_url, timeout=30000, wait_until="domcontentloaded")
             page.wait_for_timeout(1000)
@@ -103,7 +110,7 @@ def resolve_stream(page_url):
 
 def _find_m3u8(ctx, src_url):
     found = []
-    page = ctx.new_page()
+    page = _new_page(ctx)
 
     def on_response(response):
         if found:
@@ -137,7 +144,7 @@ def debug_live_frames(url, duration=60):
     """Yields JPEG screenshot bytes every 500 ms while browsing url."""
     with sync_playwright() as p:
         browser, ctx = _launch(p)
-        page = ctx.new_page()
+        page = _new_page(ctx)
         _block_ads(page)
         try:
             page.goto(url, timeout=30000, wait_until="domcontentloaded")
@@ -157,7 +164,7 @@ def debug_live_resolve_frames(page_url, duration=90):
         browser, ctx = _launch(p)
         try:
             # Step 1 – open game page
-            page = ctx.new_page()
+            page = _new_page(ctx)
             _block_ads(page)
             page.goto(page_url, timeout=30000, wait_until="domcontentloaded")
             page.wait_for_timeout(1000)
@@ -178,7 +185,7 @@ def debug_live_resolve_frames(page_url, duration=90):
                 if time.time() >= deadline:
                     break
                 found = []
-                inner = ctx.new_page()
+                inner = _new_page(ctx)
 
                 def on_response(r, _f=found):
                     if _f:
@@ -209,7 +216,7 @@ def debug_screenshot(url):
     """Abre a URL no browser, remove overlay de ad e retorna screenshot PNG como bytes."""
     with sync_playwright() as p:
         browser, ctx = _launch(p)
-        page = ctx.new_page()
+        page = _new_page(ctx)
         _block_ads(page)
         try:
             page.goto(url, timeout=30000, wait_until="domcontentloaded")
@@ -233,7 +240,7 @@ def debug_resolve(page_url):
     with sync_playwright() as p:
         browser, ctx = _launch(p)
         try:
-            page = ctx.new_page()
+            page = _new_page(ctx)
             _block_ads(page)
             page.goto(page_url, timeout=30000, wait_until="domcontentloaded")
             page.wait_for_timeout(1000)
@@ -252,7 +259,7 @@ def debug_resolve(page_url):
             for source in sources[:4]:
                 intercepted = []
                 found = []
-                inner_page = ctx.new_page()
+                inner_page = _new_page(ctx)
 
                 def on_response(response, _intercepted=intercepted, _found=found):
                     try:
@@ -310,7 +317,7 @@ def debug_scrape():
 
     with sync_playwright() as p:
         browser, ctx = _launch(p)
-        page = ctx.new_page()
+        page = _new_page(ctx)
         _block_ads(page)
         listings = {}
         screenshot_b64 = None
