@@ -178,10 +178,8 @@ function renderChannels(data){
   const entries = Object.entries(data);
 
   if(entries.length === 0){
-    if(!autoStartDone)
-      container.innerHTML = '<span class="ch-empty">Buscando canais...</span>';
-    else
-      container.innerHTML = '<span class="ch-empty">Nenhum canal disponível</span>';
+    autoStartDone = true;
+    container.innerHTML = '<span class="ch-empty">Nenhum canal disponível no momento</span>';
     return;
   }
 
@@ -197,8 +195,9 @@ function renderChannels(data){
   log(entries.length + " canal(is) disponível(is)", "ok");
 
   if(!autoStartDone){
+    autoStartDone = true;
     const first = container.querySelector(".ch-btn");
-    if(first){ first.click(); autoStartDone = true; }
+    if(first) first.click();
   }
 }
 
