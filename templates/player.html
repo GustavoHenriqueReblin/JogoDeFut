@@ -11,6 +11,8 @@
   <link rel="shortcut icon" href="/favicon.ico"/>
   <link rel="apple-touch-icon" href="/static/icons/logo-192.png"/>
   <title>Gol AO VIVO TV</title>
+  <link rel="stylesheet" href="https://cdn.plyr.io/3.7.8/plyr.css"/>
+  <script src="https://cdn.plyr.io/3.7.8/plyr.polyfilled.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/hls.js@1/dist/hls.min.js"></script>
   <style>
     @import url('https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=Syne:wght@700;800&display=swap');
@@ -18,150 +20,145 @@
     :root{
       --bg:#0a0a0f;--surface:#111118;--border:#1e1e2e;
       --accent:#e8ff47;--accent2:#47ffe8;--text:#e8e8f0;
-      --muted:#555570;--error:#ff4757;--warn:#ffaa00;
+      --muted:#555570;--error:#ff4757;
+      --plyr-color-main:#e8ff47;
+      --plyr-video-background:#000;
+      --plyr-font-family:'DM Mono',monospace;
+      --plyr-control-radius:6px;
+      --plyr-control-icon-size:18px;
+      --plyr-range-fill-background:#e8ff47;
+      --plyr-video-controls-background:linear-gradient(transparent,rgba(0,0,0,.85));
     }
     body{
       background:var(--bg);color:var(--text);font-family:'Syne',sans-serif;
       min-height:100vh;display:flex;flex-direction:column;
-      align-items:center;padding:40px 20px;gap:24px;
+      align-items:center;padding:32px 16px;gap:20px;
     }
-    body.compact .log{display:none}
     body::before{
       content:'';position:fixed;inset:0;
-      background-image:linear-gradient(var(--border) 1px,transparent 1px),linear-gradient(90deg,var(--border) 1px,transparent 1px);
+      background-image:
+        linear-gradient(var(--border) 1px,transparent 1px),
+        linear-gradient(90deg,var(--border) 1px,transparent 1px);
       background-size:48px 48px;opacity:.25;pointer-events:none;z-index:0;
     }
+
     header{position:relative;z-index:1;text-align:center}
     header h1{font-size:1.8rem;font-weight:800;letter-spacing:-.03em;color:var(--accent)}
 
     /* Player */
     .video-wrap{
       position:relative;z-index:1;width:100%;max-width:900px;
-      aspect-ratio:16/9;background:#000;border-radius:12px;
-      overflow:hidden;border:1px solid var(--border);
+      border-radius:12px;overflow:hidden;border:1px solid var(--border);
+      background:#000;
     }
-    #player{width:100%;height:100%;display:block;background:#000}
+    .plyr{--plyr-color-main:#e8ff47;border-radius:12px}
+    .plyr--video .plyr__control:hover{background:var(--accent);color:#000}
+    .plyr--video .plyr__control--overlaid{background:rgba(232,255,71,.15);border:1px solid rgba(232,255,71,.3)}
+    .plyr--video .plyr__control--overlaid:hover{background:var(--accent)}
+    .plyr--video .plyr__control--overlaid svg{color:#fff}
+    .plyr--video .plyr__control--overlaid:hover svg{color:#000}
+
     .overlay{
       position:absolute;inset:0;display:flex;flex-direction:column;
-      align-items:center;justify-content:center;gap:12px;
-      font-family:'DM Mono',monospace;font-size:.85rem;color:var(--muted);
-      background:#000;pointer-events:none;transition:opacity .2s;
+      align-items:center;justify-content:center;gap:12px;z-index:10;
+      background:#000;font-family:'DM Mono',monospace;font-size:.85rem;
+      color:var(--muted);transition:opacity .2s;pointer-events:none;
     }
-    .overlay.hidden{opacity:0;pointer-events:none}
+    .overlay.hidden{opacity:0}
     .spinner{
       width:32px;height:32px;border:3px solid var(--border);
       border-top-color:var(--accent2);border-radius:50%;
-      animation:spin .8s linear infinite;
+      animation:spin .8s linear infinite;display:none;
     }
     @keyframes spin{to{transform:rotate(360deg)}}
-    .overlay-msg{color:var(--muted)}
 
-    /* Provider bar */
-    .provider-bar{
-      position:relative;z-index:1;width:100%;max-width:900px;
-      background:var(--surface);border:1px solid var(--border);
-      border-radius:8px;padding:10px 16px;
-      display:none;align-items:center;gap:10px;flex-wrap:wrap;
-    }
-    .provider-bar.visible{display:flex}
-    .provider-label{font-family:'DM Mono',monospace;font-size:.62rem;color:var(--muted);letter-spacing:.1em;text-transform:uppercase;white-space:nowrap}
-    .prov-btn,.fs-btn{
-      background:transparent;border:1px solid var(--border);color:var(--muted);
-      font-family:'DM Mono',monospace;font-size:.72rem;
-      border-radius:6px;padding:5px 12px;cursor:pointer;transition:all .15s;white-space:nowrap;
-    }
-    .prov-btn:hover,.fs-btn:hover{border-color:var(--accent2);color:var(--accent2)}
-    .prov-btn.active{border-color:var(--accent2);color:var(--accent2);background:rgba(71,255,232,.07)}
-    .fs-btn{margin-left:auto}
-
-    /* Listings */
+    /* Channels */
     .section{
       position:relative;z-index:1;width:100%;max-width:900px;
       background:var(--surface);border:1px solid var(--border);
       border-radius:10px;padding:14px 16px;display:flex;flex-direction:column;gap:10px;
     }
-    .section-title{font-family:'DM Mono',monospace;font-size:.62rem;color:var(--muted);letter-spacing:.1em;text-transform:uppercase}
-    .btn-list{display:flex;flex-wrap:wrap;gap:8px}
-    .item-btn{
-      background:transparent;border:1px solid var(--border);color:var(--text);
-      font-family:'DM Mono',monospace;font-size:.78rem;font-weight:500;
-      border-radius:6px;padding:7px 14px;cursor:pointer;transition:all .15s;
+    .section-title{
+      font-family:'DM Mono',monospace;font-size:.62rem;
+      color:var(--muted);letter-spacing:.1em;text-transform:uppercase;
     }
-    .item-btn:hover{border-color:var(--accent);color:var(--accent)}
-    .item-btn.active{border-color:var(--accent);color:#000;background:var(--accent)}
-    .item-btn:disabled{opacity:.4;cursor:wait}
+    .ch-scroll-wrap{position:relative;display:flex;align-items:stretch}
+    .scroll-btn{
+      background:none;border:none;color:var(--muted);
+      font-size:.75rem;padding:0 10px;cursor:pointer;flex-shrink:0;
+      transition:color .15s;user-select:none;display:flex;align-items:center;
+    }
+    .scroll-btn:hover{color:var(--accent)}
+    .scroll-btn svg{display:block}
+    .btn-list{display:flex;flex-wrap:nowrap;gap:8px;overflow-x:auto;padding:2px 0 6px;scrollbar-width:none;flex:1}
+    .btn-list::-webkit-scrollbar{display:none}
+    .ch-btn{
+      background:transparent;border:1px solid var(--border);color:var(--text);
+      font-family:'DM Mono',monospace;font-size:.72rem;font-weight:500;
+      border-radius:8px;padding:10px 14px;cursor:pointer;transition:all .15s;
+      display:flex;flex-direction:column;align-items:center;gap:6px;min-width:80px;flex-shrink:0;
+    }
+    .ch-btn:hover{border-color:var(--accent)}
+    .ch-btn.active{border-color:var(--accent);background:rgba(232,255,71,.07)}
+    .ch-btn:disabled{opacity:.4;cursor:wait}
+    .ch-btn img{height:28px;width:auto;max-width:72px;object-fit:contain}
     .empty{font-family:'DM Mono',monospace;font-size:.72rem;color:var(--muted)}
 
-    /* Log */
-    .log{
-      position:relative;z-index:1;width:100%;max-width:900px;
-      background:var(--surface);border:1px solid var(--border);
-      border-radius:10px;padding:12px 16px;max-height:150px;overflow-y:auto;
-    }
-    .ll{font-family:'DM Mono',monospace;font-size:.72rem;padding:2px 0;border-bottom:1px solid #15151f;color:var(--muted);animation:fi .2s ease}
-    .ll.ok{color:var(--accent)}.ll.err{color:var(--error)}.ll.inf{color:var(--accent2)}.ll.warn{color:var(--warn)}
-    @keyframes fi{from{opacity:0;transform:translateY(3px)}to{opacity:1}}
-    ::-webkit-scrollbar{width:4px}::-webkit-scrollbar-thumb{background:var(--border);border-radius:4px}
+
+    ::-webkit-scrollbar{width:4px}
+    ::-webkit-scrollbar-thumb{background:var(--border);border-radius:4px}
   </style>
 </head>
-<body class="{{ 'show-log' if show_log else 'compact' }}">
+<body>
 
 <header>
   <h1>⚽ GOL AO VIVO TV</h1>
 </header>
 
 <div class="video-wrap">
-  <video id="player" controls playsinline></video>
+  <video id="player" playsinline></video>
   <div class="overlay" id="overlay">
-    <div class="spinner" id="spinner" style="display:none"></div>
-    <span class="overlay-msg" id="overlay-msg">Selecione um jogo ou canal</span>
+    <div class="spinner" id="spinner"></div>
+    <span id="overlay-msg">Selecione um canal</span>
   </div>
 </div>
 
-<div class="provider-bar" id="provider-bar">
-  <span class="provider-label">Fonte:</span>
-  <div id="provider-list" style="display:flex;gap:8px;flex-wrap:wrap"></div>
-  <button class="fs-btn" onclick="toggleFullscreen()">⛶ TELA CHEIA</button>
-</div>
-
-<div class="section" id="games-section">
-  <div class="section-title">Jogos ao vivo</div>
-  <div class="btn-list" id="games-list">
-    <span class="empty">Buscando jogos...</span>
-  </div>
-</div>
-
-<div class="section" id="channels-section">
+<div class="section">
   <div class="section-title">Canais</div>
-  <div class="btn-list" id="channels-list">
-    <span class="empty">Buscando canais...</span>
+  <div class="ch-scroll-wrap">
+    <button class="scroll-btn" id="scroll-left">
+      <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="10 4 6 8 10 12"/></svg>
+    </button>
+    <div class="btn-list" id="channels-list">
+      <span class="empty">Carregando...</span>
+    </div>
+    <button class="scroll-btn" id="scroll-right">
+      <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 4 10 8 6 12"/></svg>
+    </button>
   </div>
 </div>
-
-<div class="log" id="log"></div>
 
 <script>
 if ('serviceWorker' in navigator) {
   navigator.serviceWorker.register('/sw.js').catch(() => {});
 }
 
-const video    = document.getElementById('player');
-const overlay  = document.getElementById('overlay');
-const spinner  = document.getElementById('spinner');
+const videoEl    = document.getElementById('player');
+const overlay    = document.getElementById('overlay');
+const spinner    = document.getElementById('spinner');
 const overlayMsg = document.getElementById('overlay-msg');
 
-let hls = null;
-let activeKey = null;
-let autoStartDone = false;
+const player = new Plyr(videoEl, {
+  controls: ['mute','volume','fullscreen'],
+  clickToPlay: false,
+  volume: 0.5,
+  hideControls: true,
+  resetOnEnd: false,
+  storage: { enabled: false },
+});
 
-function log(msg, t = '') {
-  const d = document.getElementById('log');
-  const l = document.createElement('div');
-  l.className = 'll ' + t;
-  l.textContent = '[' + new Date().toLocaleTimeString() + '] ' + msg;
-  d.appendChild(l);
-  d.scrollTop = d.scrollHeight;
-}
+let hls = null;
+let activeUrl = null;
 
 function showOverlay(msg, loading = false) {
   overlay.classList.remove('hidden');
@@ -171,153 +168,90 @@ function showOverlay(msg, loading = false) {
 
 function hideOverlay() {
   overlay.classList.add('hidden');
-  spinner.style.display = 'none';
 }
 
-function playStream(url, referer) {
+function playStream(encUrl) {
   if (hls) { hls.destroy(); hls = null; }
-  video.src = '';
 
-  const proxyUrl = '/proxy/m3u8?url=' + encodeURIComponent(url)
-    + (referer ? '&ref=' + encodeURIComponent(referer) : '');
+  const streamUrl = '/stream?url=' + encUrl;
 
   if (Hls.isSupported()) {
     hls = new Hls({ enableWorker: false });
-    hls.loadSource(proxyUrl);
-    hls.attachMedia(video);
+    hls.loadSource(streamUrl);
+    hls.attachMedia(videoEl);
     hls.on(Hls.Events.MANIFEST_PARSED, () => {
       hideOverlay();
-      video.play().catch(() => {});
+      player.play().catch(() => {});
+      player.fullscreen.enter();
     });
     hls.on(Hls.Events.ERROR, (_, data) => {
-      if (data.fatal) {
-        showOverlay('Erro no stream');
-        log('hls error: ' + data.details, 'err');
-      }
+      if (data.fatal) showOverlay('Falha ao reproduzir. Por favor, recarregue a página.');
     });
-  } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
-    video.src = proxyUrl;
-    video.addEventListener('loadedmetadata', () => {
+  } else if (videoEl.canPlayType('application/vnd.apple.mpegurl')) {
+    player.source = { type: 'video', sources: [{ src: streamUrl, type: 'application/x-mpegURL' }] };
+    videoEl.addEventListener('loadedmetadata', () => {
       hideOverlay();
-      video.play().catch(() => {});
+      player.play().catch(() => {});
+      player.fullscreen.enter();
     }, { once: true });
   } else {
     showOverlay('HLS não suportado neste browser');
   }
 }
 
-function buildProviderBar(streams) {
-  const bar  = document.getElementById('provider-bar');
-  const list = document.getElementById('provider-list');
-  list.innerHTML = '';
+function selectChannel(name, url) {
+  if (activeUrl === url) return;
+  activeUrl = url;
 
-  if (streams.length <= 1) {
-    bar.classList.remove('visible');
-    return;
-  }
-
-  const btns = streams.map((s, i) => {
-    const btn = document.createElement('button');
-    btn.className = 'prov-btn';
-    btn.textContent = s.provider || ('Opção ' + (i + 1));
-    btn.onclick = () => {
-      btns.forEach((b, j) => b.classList.toggle('active', j === i));
-      showOverlay('Carregando...', true);
-      playStream(s.url, s.referer);
-      log('fonte: ' + (s.provider || 'opção ' + (i + 1)), 'inf');
-    };
-    list.appendChild(btn);
-    return btn;
+  document.querySelectorAll('.ch-btn').forEach(b => {
+    b.classList.toggle('active', b.dataset.url === url);
+    b.disabled = true;
   });
-  btns[0].classList.add('active');
-  bar.classList.add('visible');
+
+  showOverlay('Carregando…', true);
+  document.querySelectorAll('.ch-btn').forEach(b => { b.disabled = false; });
+  playStream(url);
 }
 
-async function selectItem(key, url) {
-  document.querySelectorAll('.item-btn').forEach(b => {
-    b.classList.toggle('active', b.dataset.key === key);
-    b.disabled = b.dataset.key === key;
-  });
-  activeKey = key;
-
-  showOverlay('Resolvendo stream…', true);
-
+(async function init() {
+  const list = document.getElementById('channels-list');
   try {
-    const res = await fetch('/resolve?url=' + encodeURIComponent(url) + '&name=' + encodeURIComponent(key));
-    const data = await res.json();
-
-    if (data.error) throw new Error(data.error);
-    if (!data.streams || data.streams.length === 0) throw new Error('nenhum stream encontrado');
-
-    buildProviderBar(data.streams);
-    playStream(data.streams[0].url, data.streams[0].referer);
-    log(data.streams.length + ' fonte(s) encontrada(s) para ' + key, 'ok');
-  } catch (e) {
-    showOverlay('Falha ao resolver stream');
-    log('erro: ' + e.message, 'err');
-  } finally {
-    document.querySelectorAll('.item-btn').forEach(b => { b.disabled = false; });
-  }
-}
-
-function renderListings(data) {
-  const games    = Object.entries(data).filter(([, v]) => v.type === 'game');
-  const channels = Object.entries(data).filter(([, v]) => v.type === 'channel');
-
-  function fillList(containerId, items) {
-    const el = document.getElementById(containerId);
-    el.innerHTML = '';
-    if (items.length === 0) {
-      el.innerHTML = '<span class="empty">Nenhum disponível</span>';
+    const channels = await fetch('/channels').then(r => r.json());
+    if (!channels.length) {
+      list.innerHTML = '<span class="empty">Nenhum canal configurado</span>';
       return;
     }
-    items.forEach(([name, info]) => {
+    list.innerHTML = '';
+    channels.forEach(ch => {
       const btn = document.createElement('button');
-      btn.className = 'item-btn' + (name === activeKey ? ' active' : '');
-      btn.textContent = name;
-      btn.dataset.key = name;
-      btn.onclick = () => selectItem(name, info.url);
-      el.appendChild(btn);
+      btn.className = 'ch-btn';
+      btn.dataset.url = ch.url;
+      btn.onclick = () => selectChannel(ch.name, ch.url);
+
+      const img = document.createElement('img');
+      img.src = '/static/logos/' + ch.name + '.webp';
+      img.alt = ch.name;
+      img.onerror = () => img.remove();
+
+      const label = document.createElement('span');
+      label.textContent = ch.name;
+
+      btn.appendChild(img);
+      btn.appendChild(label);
+      list.appendChild(btn);
     });
+  } catch {
+    list.innerHTML = '<span class="empty">Erro ao carregar canais</span>';
   }
-
-  fillList('games-list', games);
-  fillList('channels-list', channels);
-
-  log(games.length + ' jogo(s) · ' + channels.length + ' canal(is)', 'ok');
-
-  if (!autoStartDone && games.length > 0) {
-    autoStartDone = true;
-    const [name, info] = games[0];
-    selectItem(name, info.url);
-  } else if (!autoStartDone && channels.length > 0) {
-    autoStartDone = true;
-    const [name, info] = channels[0];
-    selectItem(name, info.url);
-  }
-}
-
-function toggleFullscreen() {
-  const wrap = document.querySelector('.video-wrap');
-  if (document.fullscreenElement) {
-    document.exitFullscreen();
-  } else {
-    (wrap.requestFullscreen || wrap.webkitRequestFullscreen).call(wrap);
-  }
-}
-
-(function connectSSE() {
-  const es = new EventSource('/events');
-  es.addEventListener('listings_updated', e => {
-    try { renderListings(JSON.parse(e.data)); }
-    catch (err) { console.error('SSE parse error', err); }
-  });
-  es.addEventListener('log', e => {
-    try { const d = JSON.parse(e.data); log(d.msg, d.t); }
-    catch (_) {}
-  });
-  es.onerror = () => { es.close(); setTimeout(connectSSE, 5000); };
 })();
+
+const chList = document.getElementById('channels-list');
+document.getElementById('scroll-left').addEventListener('click', () => {
+  chList.scrollBy({ left: -240, behavior: 'smooth' });
+});
+document.getElementById('scroll-right').addEventListener('click', () => {
+  chList.scrollBy({ left: 240, behavior: 'smooth' });
+});
 </script>
 </body>
 </html>

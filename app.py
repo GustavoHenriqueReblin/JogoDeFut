@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-import os, json, time, threading, queue, urllib.parse
+import os, urllib.parse, base64, secrets
 
 try:
     from dotenv import load_dotenv
@@ -11,99 +11,50 @@ from flask import Flask, render_template, request, Response, jsonify, send_from_
 from flask_cors import CORS
 import requests as http_req
 
-from scraper import (
-    scrape_listings, resolve_stream,
-    debug_screenshot, debug_resolve, debug_scrape,
-    debug_live_frames, debug_live_resolve_frames,
-)
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+from scraper import resolve_stream
+
+import logging
+logging.getLogger('werkzeug').setLevel(logging.ERROR)
 
 app = Flask(__name__)
 CORS(app)
 
-BASE_DIR      = os.path.dirname(os.path.abspath(__file__))
-PORT          = int(os.environ.get("PORT", 5000))
-POLL_INTERVAL = int(os.environ.get("POLL_INTERVAL", 1800))
-DEBUG_KEY     = os.environ.get("DEBUG_KEY", "")
+BASE_DIR     = os.path.dirname(os.path.abspath(__file__))
+PORT         = int(os.environ.get("PORT", 5000))
+PROXY_SECRET = os.environ.get("PROXY_SECRET") or secrets.token_hex(16)
 
-listings  = {}
-_lock     = threading.Lock()
-_clients  = []
-_cli_lock = threading.Lock()
+def _decrypt_url(enc: str) -> str:
+    data = base64.urlsafe_b64decode(enc + "==")
+    iv, ct = data[:12], data[12:]
+    return AESGCM(bytes.fromhex(PROXY_SECRET)).decrypt(iv, ct, None).decode()
 
-
-# ── SSE ──────────────────────────────────────────────────────────────────────
-
-def _push(msg):
-    with _cli_lock:
-        dead = []
-        for q in _clients:
-            try:
-                q.put_nowait(msg)
-            except Exception:
-                dead.append(q)
-        for q in dead:
-            _clients.remove(q)
-
-def _notify():
-    with _lock:
-        data = dict(listings)
-    _push(f"event: listings_updated\ndata: {json.dumps(data, ensure_ascii=False)}\n\n")
-
-def _log(msg, t=""):
-    _push(f"event: log\ndata: {json.dumps({'msg': msg, 't': t})}\n\n")
+def _encrypt_url(url: str) -> str:
+    iv  = secrets.token_bytes(12)
+    ct  = AESGCM(bytes.fromhex(PROXY_SECRET)).encrypt(iv, url.encode(), None)
+    return base64.urlsafe_b64encode(iv + ct).rstrip(b"=").decode()
 
 
-@app.route("/events")
-def sse():
-    def stream():
-        q = queue.Queue()
-        with _cli_lock:
-            _clients.append(q)
-        try:
-            with _lock:
-                data = dict(listings)
-            yield f"event: listings_updated\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
-            while True:
-                try:
-                    yield q.get(timeout=25)
-                except queue.Empty:
-                    yield ": ping\n\n"
-        finally:
-            with _cli_lock:
-                if q in _clients:
-                    _clients.remove(q)
-
-    return Response(
-        stream(),
-        mimetype="text/event-stream",
-        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
-    )
+def _parse_channels():
+    channels = []
+    for entry in os.environ.get("CHANNELS", "").split(","):
+        entry = entry.strip()
+        if ":" not in entry:
+            continue
+        name, url = entry.split(":", 1)
+        channels.append({"name": name.strip(), "url": url.strip()})
+    return channels
 
 
-# ── Resolve ───────────────────────────────────────────────────────────────────
-
-@app.route("/resolve")
-def resolve():
-    url = request.args.get("url", "").strip()
-    name = request.args.get("name", url).strip()
-    if not url:
-        return jsonify({"error": "url obrigatória"}), 400
-    _log(f"resolvendo: {name}", "inf")
-    try:
-        result = resolve_stream(url)
-        n = len(result.get("streams", []))
-        if n:
-            providers = ", ".join(s["provider"] for s in result["streams"])
-            _log(f"✓ {n} stream(s) encontrado(s) — {providers}", "ok")
-        else:
-            _log(f"✗ nenhum stream encontrado para: {name}", "err")
-        return jsonify(result)
-    except Exception as e:
-        _log(f"✗ erro ao resolver '{name}': {e}", "err")
-        return jsonify({"error": str(e)}), 500
+@app.route("/channels")
+def channels():
+    return jsonify([
+        {"name": ch["name"], "url": _encrypt_url(ch["url"])}
+        for ch in _parse_channels()
+    ])
 
 
-# ── HLS Proxy ─────────────────────────────────────────────────────────────────
+# ── Stream (resolve + proxy m3u8 em um só passo) ──────────────────────────────
 
 _PROXY_HEADERS = {
     "User-Agent": (
@@ -115,12 +66,26 @@ _PROXY_HEADERS = {
 }
 
 
-@app.route("/proxy/m3u8")
-def proxy_m3u8():
-    url     = request.args.get("url", "")
-    referer = request.args.get("ref", "")
-    if not url:
+@app.route("/stream")
+def stream():
+    raw = request.args.get("url", "").strip()
+    if not raw:
         return "url obrigatória", 400
+    try:
+        channel_url = _decrypt_url(raw)
+    except Exception:
+        return "url inválida", 400
+
+    try:
+        result = resolve_stream(channel_url)
+    except Exception as e:
+        return str(e), 502
+
+    if not result.get("streams"):
+        return "stream não encontrado", 404
+
+    m3u8_url = result["streams"][0]["url"]
+    referer  = result["streams"][0].get("referer", "")
 
     headers = dict(_PROXY_HEADERS)
     if referer:
@@ -128,14 +93,14 @@ def proxy_m3u8():
         headers["Origin"]  = referer.rstrip("/").rsplit("/", 1)[0]
 
     try:
-        r = http_req.get(url, headers=headers, timeout=10)
+        r = http_req.get(m3u8_url, headers=headers, timeout=10)
         r.raise_for_status()
 
         lines = []
         for line in r.text.splitlines():
             stripped = line.strip()
             if stripped and not stripped.startswith("#"):
-                seg = stripped if stripped.startswith("http") else urllib.parse.urljoin(url, stripped)
+                seg = stripped if stripped.startswith("http") else urllib.parse.urljoin(m3u8_url, stripped)
                 line = "/proxy/ts?url=" + urllib.parse.quote(seg, safe="")
             lines.append(line)
 
@@ -170,201 +135,11 @@ def proxy_ts():
         return str(e), 502
 
 
-# ── Debug ─────────────────────────────────────────────────────────────────────
-
-def _check_debug_key():
-    if not DEBUG_KEY:
-        return "DEBUG_KEY não configurado no .env", 403
-    if request.args.get("key") != DEBUG_KEY:
-        return "chave inválida", 403
-    return None
-
-
-@app.route("/debug/screenshot")
-def debug_route_screenshot():
-    err = _check_debug_key()
-    if err:
-        return err
-
-    url = request.args.get("url", "").strip()
-    if not url:
-        return "parâmetro url obrigatório", 400
-
-    try:
-        png = debug_screenshot(url)
-        return Response(png, mimetype="image/png")
-    except Exception as e:
-        return str(e), 500
-
-
-@app.route("/debug/html")
-def debug_route_html():
-    err = _check_debug_key()
-    if err:
-        return err
-
-    url = request.args.get("url", "").strip()
-    if not url:
-        return "parâmetro url obrigatório", 400
-
-    try:
-        r = http_req.get(url, headers=_PROXY_HEADERS, timeout=15)
-        escaped = r.text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-        html = f"""<!DOCTYPE html>
-<html lang="pt-BR">
-<head>
-  <meta charset="UTF-8"/>
-  <title>Debug — HTML bruto</title>
-  <style>
-    body{{font-family:monospace;background:#0a0a0f;color:#e8e8f0;padding:24px;margin:0}}
-    h2{{color:#e8ff47}}
-    .meta{{color:#888;margin-bottom:16px;font-size:.85rem}}
-    pre{{background:#111118;border:1px solid #1e1e2e;border-radius:8px;padding:16px;
-         overflow:auto;font-size:.75rem;white-space:pre-wrap;word-break:break-all}}
-    .hl{{background:#e8ff4733;border-radius:2px}}
-  </style>
-</head>
-<body>
-  <h2>HTML bruto — sem JS</h2>
-  <div class="meta">
-    URL: {url}<br>
-    Status: {r.status_code} · Content-Type: {r.headers.get('content-type','?')} · {len(r.text)} chars
-  </div>
-  <pre id="src">{escaped}</pre>
-  <script>
-    // destaca URLs que parecem m3u8 ou style.css suspeitos
-    const pre = document.getElementById('src');
-    pre.innerHTML = pre.innerHTML.replace(
-      /(https?:\/\/[^\s"'<>]+(?:\.m3u8|style\.css|\.m3u)[^\s"'<>]*)/g,
-      '<mark class="hl">$1</mark>'
-    );
-  </script>
-</body>
-</html>"""
-        return Response(html, mimetype="text/html")
-    except Exception as e:
-        return str(e), 502
-
-
-@app.route("/debug/resolve")
-def debug_route_resolve():
-    err = _check_debug_key()
-    if err:
-        return err
-
-    url = request.args.get("url", "").strip()
-    if not url:
-        return "parâmetro url obrigatório", 400
-
-    try:
-        return jsonify(debug_resolve(url))
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
-
-@app.route("/debug/live")
-def debug_route_live():
-    err = _check_debug_key()
-    if err:
-        return err
-
-    url = request.args.get("url", "").strip()
-    if not url:
-        # HTML helper page
-        html = """<!DOCTYPE html>
-<html lang="pt-BR">
-<head>
-  <meta charset="UTF-8"/>
-  <title>Debug — Live View</title>
-  <style>
-    body{font-family:monospace;background:#0a0a0f;color:#e8e8f0;padding:24px;margin:0}
-    h2{color:#e8ff47}
-    input{width:60%;padding:8px;background:#111118;border:1px solid #333;color:#e8e8f0;border-radius:4px}
-    button{padding:8px 16px;background:#e8ff47;color:#0a0a0f;border:none;border-radius:4px;cursor:pointer;margin-left:8px}
-    label{display:block;margin:12px 0 4px}
-    #frame{margin-top:20px;max-width:100%;border:1px solid #1e1e2e;border-radius:8px}
-  </style>
-</head>
-<body>
-  <h2>Live View — Playwright</h2>
-  <label>URL da página</label>
-  <input id="url" placeholder="https://..."/>
-  <button onclick="watch(false)">Assistir</button>
-  <button onclick="watch(true)">Assistir + Resolve</button>
-  <img id="frame" src="" alt="aguardando..."/>
-  <script>
-    function watch(resolve) {
-      const url = document.getElementById('url').value.trim();
-      if (!url) return;
-      const key = new URLSearchParams(location.search).get('key') || '';
-      const src = '/debug/live?url=' + encodeURIComponent(url)
-                + '&key=' + encodeURIComponent(key)
-                + (resolve ? '&resolve=1' : '');
-      document.getElementById('frame').src = src;
-    }
-  </script>
-</body>
-</html>"""
-        return Response(html, mimetype="text/html")
-
-    resolve_mode = request.args.get("resolve") == "1"
-    gen = debug_live_resolve_frames(url) if resolve_mode else debug_live_frames(url)
-
-    def mjpeg():
-        boundary = b"--frame\r\nContent-Type: image/jpeg\r\n\r\n"
-        try:
-            for frame in gen:
-                yield boundary + frame + b"\r\n"
-        except Exception:
-            pass
-
-    return Response(
-        mjpeg(),
-        mimetype="multipart/x-mixed-replace; boundary=frame",
-        headers={"Cache-Control": "no-cache"},
-    )
-
-
-@app.route("/debug/scrape")
-def debug_route_scrape():
-    err = _check_debug_key()
-    if err:
-        return err
-
-    try:
-        data = debug_scrape()
-        # Retorna página HTML com o screenshot embutido + JSON dos dados
-        screenshot = data.pop("screenshot_base64", None)
-        html = f"""<!DOCTYPE html>
-<html lang="pt-BR">
-<head>
-  <meta charset="UTF-8"/>
-  <title>Debug — Scrape</title>
-  <style>
-    body{{font-family:monospace;background:#0a0a0f;color:#e8e8f0;padding:24px;margin:0}}
-    h2{{color:#e8ff47;margin-bottom:12px}}
-    img{{max-width:100%;border:1px solid #1e1e2e;border-radius:8px;margin-bottom:24px}}
-    pre{{background:#111118;border:1px solid #1e1e2e;border-radius:8px;padding:16px;
-         overflow:auto;font-size:.8rem;white-space:pre-wrap;word-break:break-all}}
-  </style>
-</head>
-<body>
-  <h2>Screenshot</h2>
-  {"<img src='data:image/png;base64," + screenshot + "'/>" if screenshot else "<p>sem screenshot</p>"}
-  <h2>Dados encontrados</h2>
-  <pre>{json.dumps(data, ensure_ascii=False, indent=2)}</pre>
-</body>
-</html>"""
-        return Response(html, mimetype="text/html")
-    except Exception as e:
-        return str(e), 500
-
-
 # ── Static ────────────────────────────────────────────────────────────────────
 
 @app.route("/")
 def index():
-    return render_template("player.html", show_log="showLog" in request.args)
+    return render_template("player.html")
 
 @app.route("/manifest.json")
 def manifest():
@@ -378,27 +153,6 @@ def sw_js():
 def favicon():
     return send_file(os.path.join(BASE_DIR, "static", "icons", "logo-48.png"), mimetype="image/png")
 
-
-# ── Background scraper ────────────────────────────────────────────────────────
-
-def _scrape_loop():
-    while True:
-        _log("buscando listagem...", "inf")
-        try:
-            data = scrape_listings()
-            with _lock:
-                listings.clear()
-                listings.update(data)
-            _notify()
-            games    = sum(1 for v in data.values() if v["type"] == "game")
-            channels = sum(1 for v in data.values() if v["type"] == "channel")
-            _log(f"{games} jogo(s) ao vivo · {channels} canal(is)", "ok")
-        except Exception as e:
-            _log(f"erro ao buscar listagem: {e}", "err")
-        time.sleep(POLL_INTERVAL)
-
-
-threading.Thread(target=_scrape_loop, daemon=True).start()
 
 if __name__ == "__main__":
     print(f"Rodando na porta {PORT}")
