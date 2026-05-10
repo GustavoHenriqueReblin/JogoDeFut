@@ -4,3 +4,4 @@ gunicorn
 python-dotenv
 requests
 cryptography
+camoufox[geoip]

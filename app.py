@@ -66,6 +66,10 @@ _PROXY_HEADERS = {
 }
 
 
+def _client_ip() -> str:
+    return request.headers.get("X-Forwarded-For", request.remote_addr or "?").split(",")[0].strip()
+
+
 @app.route("/stream")
 def stream():
     raw = request.args.get("url", "").strip()
@@ -75,6 +79,9 @@ def stream():
         channel_url = _decrypt_url(raw)
     except Exception:
         return "url inválida", 400
+
+    ip = _client_ip()
+    print(f"[stream] ip={ip} canal={channel_url}")
 
     try:
         result = resolve_stream(channel_url)

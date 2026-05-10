@@ -1,5 +1,6 @@
-fly.toml
 .git/
+.env
+.claude/
 __pycache__/
-.envrc
 .venv/
+.envrc
