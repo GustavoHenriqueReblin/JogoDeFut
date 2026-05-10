@@ -8,11 +8,8 @@ primary_region = 'gru'
 
 [build]
 
-[processes]
-  app = "gunicorn --workers 1 --threads 4 --timeout 120 app:app"
-
 [http_service]
-  internal_port = 5000
+  internal_port = 8080
   force_https = true
   auto_stop_machines = 'stop'
   auto_start_machines = true
