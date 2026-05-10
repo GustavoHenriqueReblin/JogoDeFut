@@ -1,5 +1,5 @@
 {
   "deploy": {
-    "startCommand": "playwright install --with-deps chromium && gunicorn --workers 1 --threads 4 --timeout 120 app:app"
+    "startCommand": "gunicorn --workers 1 --threads 4 --timeout 120 app:app"
   }
 }
