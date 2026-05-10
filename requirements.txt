@@ -3,4 +3,5 @@ flask-cors
 gunicorn
 python-dotenv
 requests
+beautifulsoup4
 playwright

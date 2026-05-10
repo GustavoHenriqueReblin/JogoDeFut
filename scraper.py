@@ -1,7 +1,18 @@
-import os, base64, time
+import os, base64, time, re
 from playwright.sync_api import sync_playwright # type: ignore
+from bs4 import BeautifulSoup # type: ignore
+import requests as _http
 
-DOMAIN = os.environ.get("SCRAPER_DOMAIN", "")
+DOMAIN        = os.environ.get("SCRAPER_DOMAIN", "")
+CAPSOLVER_KEY = os.environ.get("CAPSOLVER_KEY", "")
+_TURNSTILE_SITEKEY = os.environ.get("TURNSTILE_SITEKEY", "")
+
+_CLOUDFLAIRE_PLAYERS = {
+    k: v
+    for entry in os.environ.get("CLOUDFLAIRE_PLAYERS", "").split(",")
+    if ":" in entry
+    for k, v in [entry.split(":", 1)]
+}
 
 _UA = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -36,6 +47,9 @@ window.chrome = {runtime: {}};
 Object.defineProperty(navigator, 'permissions', {
   get: () => ({ query: (p) => Promise.resolve({state: p.name==='notifications'?'denied':'granted'}) })
 });
+try {
+  Object.defineProperty(document, 'domain', { get: () => location.hostname, set: () => {} });
+} catch(e) {}
 """
 
 def _new_page(ctx):
@@ -53,66 +67,155 @@ def _block_ads(page):
     page.route("**/*", handler)
 
 
+# Domínios que bloqueiam headless — tratados separadamente ou ignorados
+_CF_BLOCKED = ["rdcanais.com"]
+
+_HEADERS = {"User-Agent": _UA, "Accept-Language": "pt-BR,pt;q=0.9"}
+
+
+def _solve_turnstile(page_url):
+    """Resolve CF Turnstile via CapSolver API. Returns token or None."""
+    if not CAPSOLVER_KEY:
+        return None
+    try:
+        r = _http.post("https://api.capsolver.com/createTask", json={
+            "clientKey": CAPSOLVER_KEY,
+            "task": {
+                "type": "AntiTurnstileTaskProxyless",
+                "websiteURL": page_url,
+                "websiteKey": _TURNSTILE_SITEKEY,
+            },
+        }, timeout=30)
+        task_id = r.json().get("taskId")
+        if not task_id:
+            return None
+        for _ in range(30):
+            time.sleep(2)
+            res = _http.post("https://api.capsolver.com/getTaskResult", json={
+                "clientKey": CAPSOLVER_KEY,
+                "taskId": task_id,
+            }, timeout=10).json()
+            if res.get("status") == "ready":
+                return res["solution"]["token"]
+    except Exception:
+        pass
+    return None
+
+
+def _resolve_cloudflaire_player(player_url):
+    """Resolve nossoplayeronlinehd.ink / w2.embedtv.live via CapSolver + get_token API."""
+    host  = re.search(r"https?://([^/]+)", player_url)
+    host  = host.group(1) if host else ""
+    fonte = _CLOUDFLAIRE_PLAYERS.get(host)
+    if not fonte:
+        return None
+
+    channel = re.search(r"/(?:tv/|embed/|)([^/?#]+)$", player_url)
+    if not channel:
+        return None
+    channel = channel.group(1)
+
+    turnstile_token = _solve_turnstile(player_url)
+    if not turnstile_token:
+        return None
+
+    try:
+        r = _http.post("https://api.cloudflaire.lat/get_token",
+            headers={
+                "content-type": "application/json",
+                "Referer": f"https://{host}/",
+                "Origin": f"https://{host}",
+            },
+            json={"fonte": fonte, "channel": channel, "token": turnstile_token},
+            timeout=15)
+        css_url = r.json().get("url")
+        if css_url:
+            body = _http.get(css_url, headers=_HEADERS, timeout=10).text
+            if body.lstrip().startswith("#EXTM3U"):
+                return css_url
+    except Exception:
+        pass
+    return None
+
+
+def _fetch_html(url):
+    r = _http.get(url, headers=_HEADERS, timeout=20)
+    r.raise_for_status()
+    return r.text
+
+
+def _extract_sources(html):
+    """Extrai botões data-src de qualquer HTML (futemax game page)."""
+    soup = BeautifulSoup(html, "html.parser")
+    sources = []
+    for btn in soup.select(".btn-player .btn-style, .btn-player .btn"):
+        src = btn.get("data-src", "").strip()
+        label = btn.get_text(strip=True) or f"Opção {len(sources) + 1}"
+        if src and not any(d in src for d in _CF_BLOCKED):
+            sources.append({"label": label, "src": src})
+    return sources
+
+
 def scrape_listings():
     if not DOMAIN:
         raise RuntimeError("SCRAPER_DOMAIN não configurado no .env")
 
+    html = _fetch_html(DOMAIN)
+    soup = BeautifulSoup(html, "html.parser")
     results = {}
-    with sync_playwright() as p:
-        browser, ctx = _launch(p)
-        page = _new_page(ctx)
-        _block_ads(page)
-        try:
-            page.goto(DOMAIN, timeout=30000, wait_until="domcontentloaded")
-            page.wait_for_timeout(2000)
-            page.evaluate("() => { const el = document.getElementById('dontfoid'); if (el) el.remove(); }")
 
-            for el in page.query_selector_all(".fm-card a"):
-                href = el.get_attribute("href") or ""
-                title = el.query_selector(".fm-card-title, h3, h2, .title")
-                name = (title.inner_text().strip() if title else el.inner_text().strip()).strip()
-                if href and name:
-                    results[name] = {"url": href, "type": "game"}
+    for a in soup.select(".fm-card a"):
+        href = a.get("href", "").strip()
+        title = a.select_one(".fm-card-title, h3, h2, .title")
+        name = (title.get_text(strip=True) if title else a.get_text(strip=True)).strip()
+        if href and name:
+            results[name] = {"url": href, "type": "game"}
 
-            for el in page.query_selector_all(".box-content-grid .item a"):
-                href = el.get_attribute("href") or ""
-                name = el.inner_text().strip()
-                if href and name and name not in results:
-                    results[name] = {"url": href, "type": "channel"}
-        finally:
-            browser.close()
+    for a in soup.select(".box-content-grid .item a"):
+        href = a.get("href", "").strip()
+        name = a.get_text(strip=True)
+        if href and name and name not in results:
+            results[name] = {"url": href, "type": "channel"}
+
     return results
 
 
 def resolve_stream(page_url):
+    html = _fetch_html(page_url)
+    sources = _extract_sources(html)
+
     streams = []
-    with sync_playwright() as p:
-        browser, ctx = _launch(p)
-        try:
-            page = _new_page(ctx)
-            _block_ads(page)
-            page.goto(page_url, timeout=30000, wait_until="domcontentloaded")
-            page.wait_for_timeout(1000)
-            page.evaluate("() => { const el = document.getElementById('dontfoid'); if (el) el.remove(); }")
 
-            sources = []
-            for btn in page.query_selector_all(".btn-player .btn-style"):
-                src = btn.get_attribute("data-src") or ""
-                label = btn.inner_text().strip() or f"Opção {len(sources) + 1}"
-                if src:
-                    sources.append({"label": label, "src": src})
-            page.close()
+    # Try CapSolver flow for known cloudflaire players (no Playwright needed)
+    cap_sources   = [s for s in sources if any(h in s["src"] for h in _CLOUDFLAIRE_PLAYERS)]
+    other_sources = [s for s in sources if not any(h in s["src"] for h in _CLOUDFLAIRE_PLAYERS)]
 
-            for source in sources[:4]:
-                m3u8 = _find_m3u8(ctx, source["src"])
-                if m3u8:
-                    streams.append({
-                        "provider": source["label"],
-                        "url": m3u8,
-                        "referer": source["src"],
-                    })
-        finally:
-            browser.close()
+    if CAPSOLVER_KEY and cap_sources:
+        for source in cap_sources[:2]:
+            m3u8 = _resolve_cloudflaire_player(source["src"])
+            if m3u8:
+                streams.append({
+                    "provider": source["label"],
+                    "url": m3u8,
+                    "referer": source["src"],
+                })
+
+    # Playwright fallback for remaining sources
+    remaining = other_sources[:5] if streams else (other_sources + cap_sources)[:5]
+    if remaining:
+        with sync_playwright() as p:
+            browser, ctx = _launch(p)
+            try:
+                for source in remaining:
+                    m3u8 = _find_m3u8(ctx, source["src"])
+                    if m3u8:
+                        streams.append({
+                            "provider": source["label"],
+                            "url": m3u8,
+                            "referer": source["src"],
+                        })
+            finally:
+                browser.close()
 
     return {"streams": streams}
 
