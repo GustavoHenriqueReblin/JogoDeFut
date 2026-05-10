@@ -74,6 +74,7 @@ def resolve_stream(player_url):
             },
             json={"fonte": fonte, "channel": channel, "token": token},
             timeout=15)
+        print(f"[scraper] get_token status={r.status_code} body={r.text[:300]!r}")
         url = r.json().get("url")
         print(f"[scraper] get_token url: {url}")
         if url:
