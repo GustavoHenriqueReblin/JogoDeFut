@@ -81,7 +81,7 @@ def resolve_stream(player_url):
             print(f"[scraper] m3u8 body starts: {body[:80]!r}")
             if body.lstrip().startswith("#EXTM3U"):
                 return {"streams": [{"provider": "HD", "url": url, "referer": player_url}]}
-    except Exception:
-        pass
+    except Exception as e:
+        print(f"[scraper] erro get_token: {e}")
 
     return {"streams": []}
