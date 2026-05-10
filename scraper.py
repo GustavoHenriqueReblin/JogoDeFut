@@ -60,10 +60,12 @@ def resolve_stream(player_url):
     channel = channel.group(1)
 
     token = _solve_turnstile(player_url)
+    print(f"[scraper] turnstile token: {'ok' if token else 'FALHOU'}")
     if not token:
         return {"streams": []}
 
     try:
+        print(f"[scraper] token obtido, chamando get_token para {fonte}/{channel}")
         r = _http.post("https://api.cloudflaire.lat/get_token",
             headers={
                 "content-type": "application/json",
@@ -73,8 +75,10 @@ def resolve_stream(player_url):
             json={"fonte": fonte, "channel": channel, "token": token},
             timeout=15)
         url = r.json().get("url")
+        print(f"[scraper] get_token url: {url}")
         if url:
             body = _http.get(url, headers=_HEADERS, timeout=10).text
+            print(f"[scraper] m3u8 body starts: {body[:80]!r}")
             if body.lstrip().startswith("#EXTM3U"):
                 return {"streams": [{"provider": "HD", "url": url, "referer": player_url}]}
     except Exception:
