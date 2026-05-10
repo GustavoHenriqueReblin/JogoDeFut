@@ -15,7 +15,7 @@ _UA = (
     "Chrome/124.0.0.0 Safari/537.36"
 )
 _HEADERS = {"User-Agent": _UA, "Accept-Language": "pt-BR,pt;q=0.9"}
-_HEADLESS = os.environ.get("PLAYWRIGHT_DEBUG", "").lower() != "true"
+_HEADLESS = os.environ.get("HEADLESS_DEBUG", "").lower() != "true"
 
 _CACHE: dict[str, tuple[float, dict]] = {}
 _CACHE_TTL = 300  # 5 minutos

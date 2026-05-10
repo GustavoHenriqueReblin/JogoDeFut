@@ -54,6 +54,131 @@ def channels():
     ])
 
 
+def _match_channel(provider: str, channel_list: list) -> dict | None:
+    """Retorna o canal cujo nome está contido no provider da API (case-insensitive)."""
+    p = provider.lower()
+    for ch in channel_list:
+        if ch["name"].lower() in p:
+            return ch
+    return None
+
+
+_MOCK_GAMES = os.environ.get("MOCK_GAMES", "").lower() == "true"
+
+_MOCK_API_DATA = {
+    "data": [
+        {
+            "id": "avai-x-fortaleza",
+            "title": "Avaí x Fortaleza",
+            "description": "Brasileirão Série B",
+            "poster": "https://i.imgur.com/5O8YIZv.jpeg",
+            "start_time": "2026-05-10 18:30:00",
+            "end_time": "2026-05-10 20:30:00",
+            "embeds": [
+                {"provider": "Disney+",             "embed_url": "https://esportesembed.com/avai-x-fortaleza-1"},
+                {"provider": "Disney+ (Alternativo)","embed_url": "https://esportesembed.com/avai-x-fortaleza-2"},
+            ],
+        },
+        {
+            "id": "corinthians-x-sao-paulo",
+            "title": "Corinthians x São Paulo",
+            "description": "Brasileirão",
+            "poster": "https://i.imgur.com/99GwG0p.png",
+            "start_time": "2026-05-10 18:30:00",
+            "end_time": "2026-05-10 20:30:00",
+            "embeds": [
+                {"provider": "Prime Video",               "embed_url": "https://esportesembed.com/corinthians-x-sao-paulo-1"},
+                {"provider": "Prime Video (Alternativo)",  "embed_url": "https://esportesembed.com/corinthians-x-sao-paulo-2"},
+                {"provider": "Prime Video (Alternativo 2)","embed_url": "https://esportesembed.com/corinthians-x-sao-paulo-3"},
+            ],
+        },
+        {
+            "id": "santos-x-red-bull-bragantino",
+            "title": "Santos x Red Bull Bragantino",
+            "description": "Brasileirão",
+            "poster": "https://i.imgur.com/Yb2wTjQ.png",
+            "start_time": "2026-05-10 18:30:00",
+            "end_time": "2026-05-10 20:30:00",
+            "embeds": [
+                {"provider": "Premiere 3",            "embed_url": "https://esportesembed.com/santos-x-red-bull-bragantino-1"},
+                {"provider": "Premiere 3",            "embed_url": "https://esportesembed.com/santos-x-red-bull-bragantino-2"},
+                {"provider": "Premiere 3 (Alternativo)","embed_url": "https://esportesembed.com/santos-x-red-bull-bragantino-3"},
+            ],
+        },
+        {
+            "id": "gremio-x-flamengo",
+            "title": "Grêmio x Flamengo",
+            "description": "Brasileirão",
+            "poster": "https://i.imgur.com/wB5pjJ6.png",
+            "start_time": "2026-05-10 19:30:00",
+            "end_time": "2026-05-10 21:30:00",
+            "embeds": [
+                {"provider": "Premiere CLubes",               "embed_url": "https://esportesembed.com/gremio-x-flamengo-1"},
+                {"provider": "Premiere Clubes (Alternativo)",  "embed_url": "https://esportesembed.com/gremio-x-flamengo-2"},
+                {"provider": "Premiere Clubes (Alternativo 2)","embed_url": "https://esportesembed.com/gremio-x-flamengo-3"},
+            ],
+        },
+        {
+            "id": "novorizontino-x-botafogo-sp",
+            "title": "Novorizontino x Botafogo-SP",
+            "description": "Brasileirão Série B",
+            "poster": "https://i.imgur.com/wxz2TGq.jpeg",
+            "start_time": "2026-05-10 19:30:00",
+            "end_time": "2026-05-10 21:30:00",
+            "embeds": [
+                {"provider": "ESPN",    "embed_url": "https://esportesembed.com/novorizontino-x-botafogo-sp-1"},
+                {"provider": "Disney+", "embed_url": "https://esportesembed.com/novorizontino-x-botafogo-sp-2"},
+            ],
+        },
+    ]
+}
+
+@app.route("/games")
+def games():
+    if _MOCK_GAMES:
+        data = _MOCK_API_DATA
+    else:
+        try:
+            r = http_req.get(
+                "https://api.reidoscanais.ooo/sports?categories=Futebol&status=live",
+                timeout=8,
+            )
+            r.raise_for_status()
+            data = r.json()
+        except Exception as e:
+            print(f"[games] erro ao buscar API: {e}")
+            return jsonify([])
+
+    channel_list = _parse_channels()
+    result = []
+
+    for game in data.get("data", []):
+        matched_embeds = []
+        for embed in game.get("embeds", []):
+            ch = _match_channel(embed.get("provider", ""), channel_list)
+            if ch:
+                matched_embeds.append({
+                    "provider": embed["provider"],
+                    "channel_name": ch["name"],
+                    "channel_url": _encrypt_url(ch["url"]),
+                })
+
+        if not matched_embeds:
+            continue
+
+        result.append({
+            "id":          game["id"],
+            "title":       game["title"],
+            "description": game.get("description", ""),
+            "poster":      game.get("poster", ""),
+            "start_time":  game.get("start_time", "")[:16],
+            "end_time":    game.get("end_time", "")[:16],
+            "embeds":      matched_embeds,
+        })
+
+    return jsonify(result)
+
+
 # ── Stream (resolve + proxy m3u8 em um só passo) ──────────────────────────────
 
 _PROXY_HEADERS = {

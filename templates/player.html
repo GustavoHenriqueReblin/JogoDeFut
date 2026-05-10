@@ -15,7 +15,7 @@
   <script src="https://cdn.plyr.io/3.7.8/plyr.polyfilled.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/hls.js@1/dist/hls.min.js"></script>
   <style>
-    @import url('https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=Syne:wght@700;800&display=swap');
+    @import url('https://fonts.googleapis.com/css2?family=Bebas+Neue&family=DM+Mono:wght@400;500&display=swap');
     *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
     :root{
       --bg:#0a0a0f;--surface:#111118;--border:#1e1e2e;
@@ -30,7 +30,7 @@
       --plyr-video-controls-background:linear-gradient(transparent,rgba(0,0,0,.85));
     }
     body{
-      background:var(--bg);color:var(--text);font-family:'Syne',sans-serif;
+      background:var(--bg);color:var(--text);font-family:'Bebas Neue',sans-serif;
       min-height:100vh;display:flex;flex-direction:column;
       align-items:center;padding:32px 16px;gap:20px;
     }
@@ -105,6 +105,33 @@
     .empty{font-family:'DM Mono',monospace;font-size:.72rem;color:var(--muted)}
 
 
+    /* Games */
+    .games-list{display:flex;flex-wrap:nowrap;gap:12px;overflow-x:auto;padding:2px 0 6px;scrollbar-width:none;flex:1}
+    .games-list::-webkit-scrollbar{display:none}
+    .game-card{
+      flex-shrink:0;width:180px;border-radius:10px;overflow:hidden;
+      border:1px solid var(--border);background:var(--bg);
+      cursor:pointer;transition:border-color .15s,transform .1s;display:flex;flex-direction:column;
+    }
+    .game-card:hover{border-color:var(--accent);transform:translateY(-2px)}
+    .game-card.active{border-color:var(--accent);background:rgba(232,255,71,.06)}
+    .game-card.no-match{opacity:.35;cursor:default;pointer-events:none}
+    .game-poster{width:100%;height:100px;object-fit:cover;display:block;background:var(--surface)}
+    .game-info{padding:10px 10px 8px;display:flex;flex-direction:column;gap:4px;flex:1}
+    .game-title{font-size:.75rem;font-weight:800;line-height:1.2;color:var(--text)}
+    .game-desc{font-family:'DM Mono',monospace;font-size:.6rem;color:var(--muted);line-height:1.3}
+    .game-time{font-family:'DM Mono',monospace;font-size:.6rem;color:var(--accent2);margin-top:auto;padding-top:6px}
+    .game-provider{
+      font-family:'DM Mono',monospace;font-size:.58rem;color:var(--muted);
+      display:flex;align-items:center;gap:4px;
+    }
+    .game-provider img{height:14px;width:auto;object-fit:contain}
+    .live-dot{
+      width:6px;height:6px;border-radius:50%;background:#ff4757;
+      display:inline-block;flex-shrink:0;animation:pulse 1.2s ease infinite;
+    }
+    @keyframes pulse{0%,100%{opacity:1}50%{opacity:.3}}
+
     ::-webkit-scrollbar{width:4px}
     ::-webkit-scrollbar-thumb{background:var(--border);border-radius:4px}
   </style>
@@ -120,6 +147,15 @@
   <div class="overlay" id="overlay">
     <div class="spinner" id="spinner"></div>
     <span id="overlay-msg">Selecione um canal</span>
+  </div>
+</div>
+
+<div class="section" id="games-section">
+  <div class="section-title" style="display:flex;align-items:center;gap:8px">
+    <span class="live-dot"></span> Jogos ao vivo
+  </div>
+  <div class="games-list" id="games-list">
+    <span class="empty">Carregando jogos...</span>
   </div>
 </div>
 
@@ -182,7 +218,6 @@ function playStream(encUrl) {
     hls.on(Hls.Events.MANIFEST_PARSED, () => {
       hideOverlay();
       player.play().catch(() => {});
-      player.fullscreen.enter();
     });
     hls.on(Hls.Events.ERROR, (_, data) => {
       if (data.fatal) showOverlay('Falha ao reproduzir. Por favor, recarregue a página.');
@@ -192,7 +227,6 @@ function playStream(encUrl) {
     videoEl.addEventListener('loadedmetadata', () => {
       hideOverlay();
       player.play().catch(() => {});
-      player.fullscreen.enter();
     }, { once: true });
   } else {
     showOverlay('HLS não suportado neste browser');
@@ -205,11 +239,17 @@ function selectChannel(name, url) {
 
   document.querySelectorAll('.ch-btn').forEach(b => {
     b.classList.toggle('active', b.dataset.url === url);
-    b.disabled = true;
+  });
+  document.querySelectorAll('.game-card').forEach(c => {
+    c.classList.toggle('active', c.dataset.url === url);
   });
 
+  // Request fullscreen here (inside user gesture) so browser allows it
+  const wrap = document.querySelector('.video-wrap');
+  const req = wrap.requestFullscreen || wrap.webkitRequestFullscreen || wrap.mozRequestFullScreen;
+  if (req) req.call(wrap).catch(() => {});
+
   showOverlay('Carregando…', true);
-  document.querySelectorAll('.ch-btn').forEach(b => { b.disabled = false; });
   playStream(url);
 }
 
@@ -252,6 +292,46 @@ document.getElementById('scroll-left').addEventListener('click', () => {
 document.getElementById('scroll-right').addEventListener('click', () => {
   chList.scrollBy({ left: 240, behavior: 'smooth' });
 });
+
+(async function loadGames() {
+  const list = document.getElementById('games-list');
+  const section = document.getElementById('games-section');
+  try {
+    const games = await fetch('/games').then(r => r.json());
+    if (!games.length) {
+      section.style.display = 'none';
+      return;
+    }
+    list.innerHTML = '';
+    games.forEach(game => {
+      const embed   = game.embeds[0];
+      const timeStr = game.start_time.slice(11, 16);
+
+      const card = document.createElement('div');
+      card.className = 'game-card';
+      card.dataset.url = embed.channel_url;
+      card.onclick = () => selectChannel(embed.channel_name, embed.channel_url);
+
+      card.innerHTML = `
+        <img class="game-poster" src="${game.poster}" alt="${game.title}" loading="lazy"
+             onerror="this.style.display='none'">
+        <div class="game-info">
+          <div class="game-title">${game.title}</div>
+          <div class="game-desc">${game.description}</div>
+          <div class="game-time">${timeStr} • AO VIVO</div>
+          <div class="game-provider">
+            <img src="/static/logos/${embed.channel_name}.webp" alt=""
+                 onerror="this.style.display='none'">
+            ${embed.channel_name}
+          </div>
+        </div>`;
+
+      list.appendChild(card);
+    });
+  } catch {
+    section.style.display = 'none';
+  }
+})();
 </script>
 </body>
 </html>
