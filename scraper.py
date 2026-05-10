@@ -2,6 +2,16 @@ import os, re, asyncio, time, threading
 import requests as _http
 from camoufox.async_api import AsyncCamoufox
 
+# Single persistent event loop running in a daemon thread.
+# Avoids "Event loop is closed" RuntimeError from asyncio subprocess
+# transport cleanup when asyncio.run() destroys the loop mid-flight.
+_ASYNC_LOOP: asyncio.AbstractEventLoop = asyncio.new_event_loop()
+threading.Thread(target=_ASYNC_LOOP.run_forever, daemon=True, name="async-loop").start()
+
+def _run_async(coro):
+    future = asyncio.run_coroutine_threadsafe(coro, _ASYNC_LOOP)
+    return future.result(timeout=120)
+
 _CLOUDFLAIRE_PLAYERS = {
     k: v
     for entry in os.environ.get("CLOUDFLAIRE_PLAYERS", "").split(",")
@@ -143,7 +153,7 @@ def _do_resolve(player_url: str) -> dict:
 
     for attempt in range(3):
         print(f"[scraper] tentativa {attempt+1}/3 de obter token")
-        token = asyncio.run(_scrape_token(player_url))
+        token = _run_async(_scrape_token(player_url))
         if not token:
             print(f"[scraper] FALHA na tentativa {attempt+1}: sem token")
             return {"streams": []}
