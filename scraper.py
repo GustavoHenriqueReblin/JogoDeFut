@@ -1,6 +1,15 @@
-import os, re, asyncio, time, threading
+import os, re, asyncio, time, threading, sys
 import requests as _http
 from camoufox.async_api import AsyncCamoufox
+
+# Suppress "Event loop is closed" RuntimeError from asyncio subprocess
+# transport __del__ during process shutdown — purely cosmetic noise.
+_orig_unraisable = sys.unraisablehook
+def _unraisable_hook(args):
+    if isinstance(args.exc_value, RuntimeError) and "Event loop is closed" in str(args.exc_value):
+        return
+    _orig_unraisable(args)
+sys.unraisablehook = _unraisable_hook
 
 # Single persistent event loop running in a daemon thread.
 # Avoids "Event loop is closed" RuntimeError from asyncio subprocess
