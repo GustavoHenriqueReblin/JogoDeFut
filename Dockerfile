@@ -25,4 +25,4 @@ COPY . .
 # baixa o Firefox patcheado do camoufox
 RUN .venv/bin/python -m camoufox fetch
 
-CMD ["/app/.venv/bin/gunicorn", "--workers", "1", "--threads", "4", "--timeout", "120", "--bind", "0.0.0.0:8080", "app:app"]
+CMD ["/app/.venv/bin/gunicorn", "--workers", "1", "--threads", "4", "--timeout", "120", "--bind", "0.0.0.0:8080", "--access-logfile", "/dev/null", "--error-logfile", "-", "--log-level", "warning", "app:app"]
