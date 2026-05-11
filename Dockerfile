@@ -9,6 +9,7 @@ COPY requirements.txt ./
 RUN .venv/bin/pip install -r requirements.txt
 
 FROM python:3.12.13-slim
+ENV PYTHONUNBUFFERED=1
 WORKDIR /app
 
 # dependências do Firefox (necessárias para camoufox)
