@@ -59,24 +59,36 @@ async def _scrape_token(page_url: str) -> str | None:
         page.on("request", intercept)
         page.on("response", intercept_response)
 
-    async def _poll_token(page, attempts=20):
+    async def _poll_token(page, attempts=45):
         nonlocal token
         for i in range(attempts):
             if token:
                 break
             try:
-                t = await page.evaluate("""() => {
-                    const el = document.querySelector('[name="cf-turnstile-response"]');
-                    return el ? el.value : null;
+                info = await page.evaluate("""() => {
+                    const cf = document.querySelector('[name="cf-turnstile-response"]');
+                    const frames = document.querySelectorAll('iframe');
+                    const widget = document.querySelector('.cf-turnstile, [data-sitekey]');
+                    return {
+                        token: cf ? cf.value : null,
+                        iframes: frames.length,
+                        srcs: Array.from(frames).map(f => f.src.slice(0, 100)),
+                        hasWidget: !!widget,
+                        bodyLen: document.body ? document.body.innerHTML.length : 0,
+                    };
                 }""")
-                if t:
-                    token = t
+                if i == 0:
+                    print(f"[scraper] diagnóstico: iframes={info.get('iframes')}, hasWidget={info.get('hasWidget')}, bodyLen={info.get('bodyLen')}")
+                    for s in info.get('srcs', []):
+                        print(f"[scraper]   iframe src: {s}")
+                if info.get('token'):
+                    token = info['token']
                     print(f"[scraper] token capturado via DOM (tentativa {i+1})")
                     break
             except Exception as ex:
                 print(f"[scraper] erro ao ler DOM (tentativa {i+1}): {ex}")
             if (i + 1) % 5 == 0:
-                print(f"[scraper] ainda aguardando token... {i+1}/{attempts}s")
+                print(f"[scraper] aguardando token {i+1}/{attempts} | iframes={info.get('iframes',0) if 'info' in dir() else '?'}")
             await asyncio.sleep(1)
 
     print(f"[scraper] abrindo browser para: {page_url}")
@@ -84,10 +96,10 @@ async def _scrape_token(page_url: str) -> str | None:
         page = await browser.new_page()
         _make_interceptors(page)
         try:
-            await page.goto(page_url, wait_until="domcontentloaded", timeout=25000)
+            await page.goto(page_url, wait_until="domcontentloaded", timeout=30000)
             print(f"[scraper] página carregada: {await page.title()}")
-            await asyncio.sleep(2)
-            await _poll_token(page, attempts=45)
+            await asyncio.sleep(3)
+            await _poll_token(page)
         except Exception as e:
             print(f"[scraper] erro ao carregar página: {e}")
 
