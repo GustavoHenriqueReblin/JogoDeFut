@@ -86,7 +86,8 @@ async def _scrape_token(page_url: str) -> str | None:
         try:
             await page.goto(page_url, wait_until="domcontentloaded", timeout=25000)
             print(f"[scraper] página carregada: {await page.title()}")
-            await _poll_token(page)
+            await asyncio.sleep(2)
+            await _poll_token(page, attempts=45)
         except Exception as e:
             print(f"[scraper] erro ao carregar página: {e}")
 
