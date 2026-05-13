@@ -4,7 +4,9 @@
       "Bash(python -c \"from PIL import Image; print\\('ok'\\)\")",
       "Bash(pip install *)",
       "Bash(playwright install *)",
-      "WebSearch"
+      "WebSearch",
+      "Bash(python -c \"import scraper; print\\('import OK'\\)\")",
+      "Bash(python -c \"import app; print\\('import OK'\\)\")"
     ]
   }
 }

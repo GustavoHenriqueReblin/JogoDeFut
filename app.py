@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-import os, urllib.parse, base64, secrets
+import os, urllib.parse, base64, secrets, time, threading
 
 try:
     from dotenv import load_dotenv
@@ -12,7 +12,7 @@ from flask_cors import CORS
 import requests as http_req
 
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
-from scraper import resolve_stream
+from scraper import resolve_stream, _CACHE, _CACHE_TTL
 
 import logging
 logging.getLogger('werkzeug').setLevel(logging.ERROR)
@@ -177,6 +177,50 @@ def games():
         })
 
     return jsonify(result)
+
+
+# ── Resolve assíncrono ───────────────────────────────────────────────────────
+
+_RESOLVE_STATUS: dict[str, str] = {}  # encrypted_url -> "loading" | "ready" | "error"
+_RESOLVE_LOCK = threading.Lock()
+
+
+@app.route("/resolve")
+def resolve_start():
+    raw = request.args.get("url", "").strip()
+    if not raw:
+        return jsonify({"status": "error"}), 400
+    try:
+        channel_url = _decrypt_url(raw)
+    except Exception:
+        return jsonify({"status": "error"}), 400
+
+    cached = _CACHE.get(channel_url)
+    if cached and (time.time() - cached[0]) < _CACHE_TTL:
+        _RESOLVE_STATUS[raw] = "ready"
+        return jsonify({"status": "ready"})
+
+    with _RESOLVE_LOCK:
+        if _RESOLVE_STATUS.get(raw) == "loading":
+            return jsonify({"status": "loading"})
+        _RESOLVE_STATUS[raw] = "loading"
+
+    def _bg():
+        try:
+            result = resolve_stream(channel_url)
+            _RESOLVE_STATUS[raw] = "ready" if result.get("streams") else "error"
+        except Exception:
+            _RESOLVE_STATUS[raw] = "error"
+
+    threading.Thread(target=_bg, daemon=True).start()
+    return jsonify({"status": "loading"})
+
+
+@app.route("/resolve/status")
+def resolve_status():
+    raw = request.args.get("url", "").strip()
+    status = _RESOLVE_STATUS.get(raw, "unknown")
+    return jsonify({"status": status})
 
 
 # ── Stream (resolve + proxy m3u8 em um só passo) ──────────────────────────────

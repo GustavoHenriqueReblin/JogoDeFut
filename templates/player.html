@@ -233,9 +233,12 @@ function playStream(encUrl) {
   }
 }
 
-function selectChannel(name, url) {
+let _currentUrl = null;
+
+async function selectChannel(name, url) {
   if (activeUrl === url) return;
   activeUrl = url;
+  _currentUrl = url;
 
   document.querySelectorAll('.ch-btn').forEach(b => {
     b.classList.toggle('active', b.dataset.url === url);
@@ -249,8 +252,35 @@ function selectChannel(name, url) {
   const req = wrap.requestFullscreen || wrap.webkitRequestFullscreen || wrap.mozRequestFullScreen;
   if (req) req.call(wrap).catch(() => {});
 
-  showOverlay('Carregando…', true);
-  playStream(url);
+  showOverlay('Buscando stream…', true);
+
+  try {
+    await fetch('/resolve?url=' + url);
+  } catch { /* ignora, status vai mostrar o erro */ }
+
+  const MAX_WAIT = 120;
+  for (let elapsed = 0; elapsed < MAX_WAIT; elapsed += 2) {
+    if (_currentUrl !== url) return; // canal trocado, aborta
+    await new Promise(r => setTimeout(r, 2000));
+    if (_currentUrl !== url) return;
+
+    let resp;
+    try {
+      resp = await fetch('/resolve/status?url=' + url).then(r => r.json());
+    } catch { continue; }
+
+    if (resp.status === 'ready') {
+      playStream(url);
+      return;
+    }
+    if (resp.status === 'error') {
+      showOverlay('Stream não disponível no momento.');
+      return;
+    }
+    overlayMsg.textContent = `Buscando stream… ${elapsed + 2}s`;
+  }
+
+  if (_currentUrl === url) showOverlay('Timeout: stream não disponível.');
 }
 
 (async function init() {
