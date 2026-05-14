@@ -1,13 +1,6 @@
 import os, re, asyncio, time, threading, sys
 import requests as _http
-from camoufox.async_api import AsyncCamoufox
-
-_orig_unraisable = sys.unraisablehook
-def _unraisable_hook(args):
-    if isinstance(args.exc_value, RuntimeError) and "Event loop is closed" in str(args.exc_value):
-        return
-    _orig_unraisable(args)
-sys.unraisablehook = _unraisable_hook
+from patchright.async_api import async_playwright
 
 _CLOUDFLAIRE_PLAYERS = {
     k: v
@@ -39,8 +32,10 @@ async def _scrape_token(page_url: str) -> str | None:
             if "challenges.cloudflare.com/turnstile" in request.url and "token=" in request.url:
                 m = re.search(r"token=([^&]+)", request.url)
                 if m:
-                    token = m.group(1)
-                    print("[scraper] token capturado via URL")
+                    t = m.group(1)
+                    if t.count('.') >= 2 and len(t) > 100:
+                        token = t
+                        print(f"[scraper] token capturado via URL len={len(t)}")
 
         async def intercept_response(response):
             nonlocal token
@@ -51,8 +46,10 @@ async def _scrape_token(page_url: str) -> str | None:
                     body = await response.text()
                     m = re.search(r'"token"\s*:\s*"([^"]+)"', body)
                     if m:
-                        token = m.group(1)
-                        print("[scraper] token capturado via response body")
+                        t = m.group(1)
+                        if t.count('.') >= 2 and len(t) > 100:
+                            token = t
+                            print(f"[scraper] token capturado via response body len={len(t)}")
                 except Exception:
                     pass
 
@@ -69,9 +66,9 @@ async def _scrape_token(page_url: str) -> str | None:
                     const el = document.querySelector('[name="cf-turnstile-response"]');
                     return el ? el.value : null;
                 }""")
-                if t and len(t) > 20:
+                if t and t.count('.') >= 2 and len(t) > 100:
                     token = t
-                    print(f"[scraper] token capturado via DOM (tentativa {i+1})")
+                    print(f"[scraper] token capturado via DOM (tentativa {i+1}) len={len(t)}")
                     break
             except Exception as ex:
                 print(f"[scraper] erro ao ler DOM (tentativa {i+1}): {ex}")
@@ -80,11 +77,13 @@ async def _scrape_token(page_url: str) -> str | None:
             await asyncio.sleep(1)
 
     print(f"[scraper] abrindo browser para: {page_url}")
-    async with AsyncCamoufox(headless=_HEADLESS, locale="pt-BR") as browser:
-        page = await browser.new_page()
+    async with async_playwright() as pw:
+        browser = await pw.chromium.launch(headless=_HEADLESS)
+        ctx = await browser.new_context(locale="pt-BR", accept_downloads=False)
+        page = await ctx.new_page()
         _make_interceptors(page)
         try:
-            await page.goto(page_url, wait_until="domcontentloaded", timeout=30000)
+            await page.goto(page_url, wait_until="domcontentloaded", timeout=60000)
             title = await page.title()
             print(f"[scraper] página carregada: {title}")
             await page.bring_to_front()
@@ -110,6 +109,9 @@ async def _scrape_token(page_url: str) -> str | None:
             await _poll_token(page)
         except Exception as e:
             print(f"[scraper] erro ao carregar página: {e}")
+        finally:
+            await ctx.close()
+            await browser.close()
 
     if token:
         print("[scraper] token obtido com sucesso")
@@ -169,8 +171,8 @@ def _do_resolve(player_url: str) -> dict:
 
     print(f"[scraper] resolvendo canal={channel} fonte={fonte}")
 
-    for attempt in range(3):
-        print(f"[scraper] tentativa {attempt+1}/3 de obter token")
+    for attempt in range(5):
+        print(f"[scraper] tentativa {attempt+1}/5 de obter token")
         token = asyncio.run(_scrape_token(player_url))
         if not token:
             print(f"[scraper] FALHA na tentativa {attempt+1}: sem token")
@@ -180,15 +182,23 @@ def _do_resolve(player_url: str) -> dict:
                 "https://api.cloudflaire.lat/get_token",
                 headers={
                     "content-type": "application/json",
-                    "Referer": f"https://{host}/",
-                    "Origin": f"https://{host}",
+                    "accept": "*/*",
+                    "accept-language": "pt-BR,pt;q=0.9",
+                    "origin": f"https://{host}",
+                    "referer": f"https://{host}/",
+                    "sec-ch-ua": '"Chromium";v="124", "Google Chrome";v="124", "Not-A.Brand";v="99"',
+                    "sec-ch-ua-mobile": "?0",
+                    "sec-ch-ua-platform": '"Windows"',
+                    "sec-fetch-dest": "empty",
+                    "sec-fetch-mode": "cors",
+                    "sec-fetch-site": "cross-site",
                 },
                 json={"fonte": fonte, "channel": channel, "token": token},
                 timeout=15,
             )
             print(f"[scraper] get_token status={r.status_code} (tentativa {attempt+1}) token={token[:30]}...")
             if r.status_code == 404:
-                print(f"[scraper] API retornou 404 body={r.text[:300]!r} canal={channel} fonte={fonte}, tentando novo token...")
+                print(f"[scraper] API retornou 404 body={r.text[:300]!r} canal={channel} fonte={fonte}, tentando novo token... ({attempt+1}/5)")
                 continue
             if r.status_code != 200 and r.status_code != 201:
                 print(f"[scraper] ERRO inesperado da API: status={r.status_code} body={r.text[:200]!r}")
