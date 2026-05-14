@@ -29,9 +29,5 @@ COPY . .
 # instala Chromium do patchright
 RUN .venv/bin/python -m patchright install chromium
 
-CMD ["xvfb-run", "--server-args=-screen 0 1280x720x24", \
-     "/app/.venv/bin/gunicorn", \
-     "--workers", "1", "--threads", "4", "--timeout", "120", \
-     "--bind", "0.0.0.0:8080", \
-     "--access-logfile", "/dev/null", "--error-logfile", "-", "--log-level", "warning", \
-     "app:app"]
+ENV PORT=8080
+CMD ["sh", "-c", "xvfb-run --server-args='-screen 0 1280x720x24' /app/.venv/bin/gunicorn --workers 1 --threads 4 --timeout 120 --bind 0.0.0.0:${PORT} --access-logfile /dev/null --error-logfile - --log-level warning app:app"]
