@@ -311,6 +311,54 @@ def proxy_ts():
         return str(e), 502
 
 
+# ── Debug ─────────────────────────────────────────────────────────────────────
+
+@app.route("/debug/screenshot")
+def debug_screenshot():
+    path = "/tmp/camoufox_debug.png"
+    if not os.path.exists(path):
+        return "nenhum screenshot disponível", 404
+    return send_file(path, mimetype="image/png")
+
+
+@app.route("/debug")
+def debug_page():
+    return """<!DOCTYPE html>
+<html><head><meta charset="UTF-8"><title>Debug</title>
+<style>body{background:#111;color:#eee;font-family:monospace;padding:16px}
+img{max-width:100%;border:1px solid #333;display:block;margin-top:8px}
+#status{font-size:.8rem;color:#888;margin-top:6px}</style>
+</head><body>
+<h3>camoufox screenshot</h3>
+<div id="status">aguardando...</div>
+<img id="shot" src="" alt="screenshot">
+<script>
+let lastMod = null;
+async function refresh() {
+  try {
+    const r = await fetch('/debug/screenshot/meta');
+    const d = await r.json();
+    if (d.mtime !== lastMod) {
+      lastMod = d.mtime;
+      document.getElementById('shot').src = '/debug/screenshot?t=' + Date.now();
+      document.getElementById('status').textContent = 'atualizado: ' + new Date(d.mtime * 1000).toLocaleTimeString();
+    }
+  } catch {}
+}
+refresh();
+setInterval(refresh, 2000);
+</script>
+</body></html>"""
+
+
+@app.route("/debug/screenshot/meta")
+def debug_screenshot_meta():
+    path = "/tmp/camoufox_debug.png"
+    if not os.path.exists(path):
+        return jsonify({"mtime": None})
+    return jsonify({"mtime": os.path.getmtime(path)})
+
+
 # ── Static ────────────────────────────────────────────────────────────────────
 
 @app.route("/")

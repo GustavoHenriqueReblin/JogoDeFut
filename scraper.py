@@ -85,8 +85,28 @@ async def _scrape_token(page_url: str) -> str | None:
         _make_interceptors(page)
         try:
             await page.goto(page_url, wait_until="domcontentloaded", timeout=30000)
-            print(f"[scraper] página carregada: {await page.title()}")
+            title = await page.title()
+            print(f"[scraper] página carregada: {title}")
             await page.bring_to_front()
+
+            # screenshot de debug
+            try:
+                await page.screenshot(path="/tmp/camoufox_debug.png", full_page=False)
+                print("[scraper] screenshot salvo em /tmp/camoufox_debug.png")
+            except Exception as se:
+                print(f"[scraper] screenshot falhou: {se}")
+
+            # snapshot do DOM relevante
+            try:
+                snippet = await page.evaluate("""() => {
+                    const el = document.querySelector('.cf-turnstile, [data-sitekey], [name="cf-turnstile-response"]');
+                    const frames = Array.from(document.querySelectorAll('iframe')).map(f => f.src).filter(Boolean);
+                    return JSON.stringify({ widget: el ? el.outerHTML.slice(0,300) : null, iframes: frames, bodyLen: document.body.innerHTML.length });
+                }""")
+                print(f"[scraper] dom-snapshot: {snippet}")
+            except Exception as de:
+                print(f"[scraper] dom-snapshot falhou: {de}")
+
             await _poll_token(page)
         except Exception as e:
             print(f"[scraper] erro ao carregar página: {e}")
