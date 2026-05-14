@@ -74,6 +74,10 @@ async def _scrape_token(page_url: str) -> str | None:
                 print(f"[scraper] erro ao ler DOM (tentativa {i+1}): {ex}")
             if (i + 1) % 5 == 0:
                 print(f"[scraper] aguardando token... {i+1}/{attempts}s")
+                try:
+                    await page.screenshot(path="/tmp/camoufox_debug.png", full_page=False)
+                except Exception:
+                    pass
             await asyncio.sleep(1)
 
     print(f"[scraper] abrindo browser para: {page_url}")
