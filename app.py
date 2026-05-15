@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-import os, urllib.parse, base64, secrets, time, threading
+import os, urllib.parse, base64, secrets, time, threading, queue
 
 try:
     from dotenv import load_dotenv
@@ -19,6 +19,12 @@ logging.getLogger('werkzeug').setLevel(logging.ERROR)
 
 app = Flask(__name__)
 CORS(app)
+
+_ACTIVE_IPS: dict[str, float] = {}
+_ACTIVE_LOCK = threading.Lock()
+_IP_TTL = 30
+_STATUS_SUBSCRIBERS: list[queue.Queue] = []
+_STATUS_LOCK = threading.Lock()
 
 BASE_DIR     = os.path.dirname(os.path.abspath(__file__))
 PORT         = int(os.environ.get("PORT", 5000))
@@ -147,7 +153,7 @@ def games():
             r.raise_for_status()
             data = r.json()
         except Exception as e:
-            print(f"[games] erro ao buscar API: {e}")
+            app.logger.error("[games] erro ao buscar API: %s", e)
             return jsonify([])
 
     channel_list = _parse_channels()
@@ -251,7 +257,13 @@ def stream():
         return "url inválida", 400
 
     ip = _client_ip()
-    print(f"[stream] ip={ip} canal={channel_url}")
+    with _ACTIVE_LOCK:
+        is_new = ip not in _ACTIVE_IPS or (time.time() - _ACTIVE_IPS[ip]) >= _IP_TTL
+        _ACTIVE_IPS[ip] = time.time()
+        if is_new:
+            active = sum(1 for t in _ACTIVE_IPS.values() if time.time() - t < _IP_TTL)
+            print(f"Novo IP ({ip}) conectado. Total ativos: ({active}).")
+            _push_status(active)
 
     try:
         result = resolve_stream(channel_url)
@@ -312,52 +324,45 @@ def proxy_ts():
         return str(e), 502
 
 
-# ── Debug ─────────────────────────────────────────────────────────────────────
-
-@app.route("/debug/screenshot")
-def debug_screenshot():
-    path = "/tmp/camoufox_debug.png"
-    if not os.path.exists(path):
-        return "nenhum screenshot disponível", 404
-    return send_file(path, mimetype="image/png")
+def _push_status(count: int):
+    with _STATUS_LOCK:
+        for q in _STATUS_SUBSCRIBERS:
+            q.put_nowait(count)
 
 
-@app.route("/debug")
-def debug_page():
-    return """<!DOCTYPE html>
-<html><head><meta charset="UTF-8"><title>Debug</title>
-<style>body{background:#111;color:#eee;font-family:monospace;padding:16px}
-img{max-width:100%;border:1px solid #333;display:block;margin-top:8px}
-#status{font-size:.8rem;color:#888;margin-top:6px}</style>
-</head><body>
-<h3>camoufox screenshot</h3>
-<div id="status">aguardando...</div>
-<img id="shot" src="" alt="screenshot">
-<script>
-let lastMod = null;
-async function refresh() {
-  try {
-    const r = await fetch('/debug/screenshot/meta');
-    const d = await r.json();
-    if (d.mtime !== lastMod) {
-      lastMod = d.mtime;
-      document.getElementById('shot').src = '/debug/screenshot?t=' + Date.now();
-      document.getElementById('status').textContent = 'atualizado: ' + new Date(d.mtime * 1000).toLocaleTimeString();
-    }
-  } catch {}
-}
-refresh();
-setInterval(refresh, 2000);
-</script>
-</body></html>"""
+
+@app.route("/status")
+def status():
+    now = time.time()
+    with _ACTIVE_LOCK:
+        active = [ip for ip, t in _ACTIVE_IPS.items() if now - t < _IP_TTL]
+    return jsonify({"devices": len(active)})
 
 
-@app.route("/debug/screenshot/meta")
-def debug_screenshot_meta():
-    path = "/tmp/camoufox_debug.png"
-    if not os.path.exists(path):
-        return jsonify({"mtime": None})
-    return jsonify({"mtime": os.path.getmtime(path)})
+@app.route("/status/stream")
+def status_stream():
+    q = queue.Queue()
+    with _STATUS_LOCK:
+        _STATUS_SUBSCRIBERS.append(q)
+
+    def generate():
+        now = time.time()
+        with _ACTIVE_LOCK:
+            count = sum(1 for t in _ACTIVE_IPS.values() if now - t < _IP_TTL)
+        yield f"data: {count}\n\n"
+        try:
+            while True:
+                try:
+                    count = q.get(timeout=30)
+                    yield f"data: {count}\n\n"
+                except queue.Empty:
+                    yield ": keep-alive\n\n"
+        finally:
+            with _STATUS_LOCK:
+                _STATUS_SUBSCRIBERS.remove(q)
+
+    return Response(generate(), mimetype="text/event-stream",
+                    headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
 
 # ── Static ────────────────────────────────────────────────────────────────────
@@ -380,5 +385,4 @@ def favicon():
 
 
 if __name__ == "__main__":
-    print(f"Rodando na porta {PORT}")
     app.run(host="0.0.0.0", port=PORT, debug=False)

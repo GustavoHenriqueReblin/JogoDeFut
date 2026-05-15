@@ -74,10 +74,6 @@ async def _scrape_token(page_url: str) -> str | None:
                 print(f"[scraper] erro ao ler DOM (tentativa {i+1}): {ex}")
             if (i + 1) % 5 == 0:
                 print(f"[scraper] aguardando token... {i+1}/{attempts}s")
-                try:
-                    await page.screenshot(path="/tmp/camoufox_debug.png", full_page=False)
-                except Exception:
-                    pass
             await asyncio.sleep(1)
 
     print(f"[scraper] abrindo browser para: {page_url}")
@@ -91,24 +87,6 @@ async def _scrape_token(page_url: str) -> str | None:
             title = await page.title()
             print(f"[scraper] página carregada: {title}")
             await page.bring_to_front()
-
-            # screenshot de debug
-            try:
-                await page.screenshot(path="/tmp/camoufox_debug.png", full_page=False)
-                print("[scraper] screenshot salvo em /tmp/camoufox_debug.png")
-            except Exception as se:
-                print(f"[scraper] screenshot falhou: {se}")
-
-            # snapshot do DOM relevante
-            try:
-                snippet = await page.evaluate("""() => {
-                    const el = document.querySelector('.cf-turnstile, [data-sitekey], [name="cf-turnstile-response"]');
-                    const frames = Array.from(document.querySelectorAll('iframe')).map(f => f.src).filter(Boolean);
-                    return JSON.stringify({ widget: el ? el.outerHTML.slice(0,300) : null, iframes: frames, bodyLen: document.body.innerHTML.length });
-                }""")
-                print(f"[scraper] dom-snapshot: {snippet}")
-            except Exception as de:
-                print(f"[scraper] dom-snapshot falhou: {de}")
 
             await _poll_token(page)
         except Exception as e:
@@ -203,6 +181,7 @@ def _do_resolve(player_url: str) -> dict:
             print(f"[scraper] get_token status={r.status_code} (tentativa {attempt+1}) token={token[:30]}...")
             if r.status_code == 404:
                 print(f"[scraper] API retornou 404 body={r.text[:300]!r} canal={channel} fonte={fonte}, tentando novo token... ({attempt+1}/5)")
+                time.sleep(3)
                 continue
             if r.status_code != 200 and r.status_code != 201:
                 print(f"[scraper] ERRO inesperado da API: status={r.status_code} body={r.text[:200]!r}")

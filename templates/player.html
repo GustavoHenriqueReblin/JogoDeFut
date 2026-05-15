@@ -193,6 +193,13 @@ const player = new Plyr(videoEl, {
   storage: { enabled: false },
 });
 
+player.on('enterfullscreen', () => {
+  screen.orientation?.lock('landscape').catch(() => {});
+});
+player.on('exitfullscreen', () => {
+  screen.orientation?.unlock();
+});
+
 let hls = null;
 let activeUrl = null;
 
@@ -218,6 +225,7 @@ function playStream(encUrl) {
     hls.on(Hls.Events.MANIFEST_PARSED, () => {
       hideOverlay();
       player.play().catch(() => {});
+      player.fullscreen.enter();
     });
     hls.on(Hls.Events.ERROR, (_, data) => {
       if (data.fatal) showOverlay('Falha ao reproduzir. Por favor, recarregue a página.');
@@ -227,6 +235,7 @@ function playStream(encUrl) {
     videoEl.addEventListener('loadedmetadata', () => {
       hideOverlay();
       player.play().catch(() => {});
+      player.fullscreen.enter();
     }, { once: true });
   } else {
     showOverlay('HLS não suportado neste browser');
@@ -247,10 +256,6 @@ async function selectChannel(name, url) {
     c.classList.toggle('active', c.dataset.url === url);
   });
 
-  // Request fullscreen here (inside user gesture) so browser allows it
-  const wrap = document.querySelector('.video-wrap');
-  const req = wrap.requestFullscreen || wrap.webkitRequestFullscreen || wrap.mozRequestFullScreen;
-  if (req) req.call(wrap).catch(() => {});
 
   showOverlay('Buscando stream…', true);
 
