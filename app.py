@@ -64,6 +64,7 @@ def _match_channel(provider: str, channel_list: list) -> dict | None:
 
 
 _MOCK_GAMES = os.environ.get("MOCK_GAMES", "").lower() == "true"
+_GAMES_API_URL = os.environ["GAMES_API_URL"]
 
 _MOCK_API_DATA = {
     "data": [
@@ -140,7 +141,7 @@ def games():
     else:
         try:
             r = http_req.get(
-                "https://api.reidoscanais.ooo/sports?categories=Futebol&status=live",
+                _GAMES_API_URL,
                 timeout=8,
             )
             r.raise_for_status()
