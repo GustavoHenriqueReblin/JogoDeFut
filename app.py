@@ -218,7 +218,7 @@ def stream():
             stripped = line.strip()
             if stripped and not stripped.startswith("#"):
                 seg = stripped if stripped.startswith("http") else urllib.parse.urljoin(m3u8_url, stripped)
-                line = "/proxy/ts?url=" + urllib.parse.quote(seg, safe="")
+                line = "/proxy/ts?url=" + _encrypt_url(seg)
             lines.append(line)
 
         return Response(
@@ -232,9 +232,13 @@ def stream():
 
 @app.route("/proxy/ts")
 def proxy_ts():
-    url = urllib.parse.unquote(request.args.get("url", ""))
-    if not url:
+    raw = request.args.get("url", "").strip()
+    if not raw:
         return "url obrigatória", 400
+    try:
+        url = _decrypt_url(raw)
+    except Exception:
+        return "url inválida", 400
     try:
         r = http_req.get(url, headers=_PROXY_HEADERS, timeout=20, stream=True)
         r.raise_for_status()
