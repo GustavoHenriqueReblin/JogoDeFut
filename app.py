@@ -66,9 +66,9 @@ def _normalize(s: str) -> str:
 
 def _match_channel(provider: str, channel_list: list) -> dict | None:
     p = _normalize(provider)
-    for ch in channel_list:
-        if _normalize(ch["name"]) == p:
-            return ch
+    candidates = [ch for ch in channel_list if p.startswith(_normalize(ch["name"]))]
+    if candidates:
+        return max(candidates, key=lambda ch: len(ch["name"]))
     return None
 
 
