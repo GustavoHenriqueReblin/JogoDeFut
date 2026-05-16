@@ -12,10 +12,11 @@ from flask_cors import CORS
 import requests as http_req
 
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
-from scraper import resolve_stream, _CACHE, _CACHE_TTL
+from scraper import resolve_stream, _CACHE, _CACHE_TTL, _log
 
 import logging
 logging.getLogger('werkzeug').setLevel(logging.ERROR)
+logging.getLogger('apscheduler').setLevel(logging.WARNING)
 
 app = Flask(__name__)
 CORS(app)
@@ -60,101 +61,28 @@ def channels():
     ])
 
 
+def _normalize(s: str) -> str:
+    return s.lower().replace(" ", "")
+
 def _match_channel(provider: str, channel_list: list) -> dict | None:
-    """Retorna o canal cujo nome está contido no provider da API (case-insensitive)."""
-    p = provider.lower()
+    p = _normalize(provider)
     for ch in channel_list:
-        if ch["name"].lower() in p:
+        if _normalize(ch["name"]) == p:
             return ch
     return None
 
 
-_MOCK_GAMES = os.environ.get("MOCK_GAMES", "").lower() == "true"
 _GAMES_API_URL = os.environ["GAMES_API_URL"]
-
-_MOCK_API_DATA = {
-    "data": [
-        {
-            "id": "avai-x-fortaleza",
-            "title": "Avaí x Fortaleza",
-            "description": "Brasileirão Série B",
-            "poster": "https://i.imgur.com/5O8YIZv.jpeg",
-            "start_time": "2026-05-10 18:30:00",
-            "end_time": "2026-05-10 20:30:00",
-            "embeds": [
-                {"provider": "Disney+",             "embed_url": "https://esportesembed.com/avai-x-fortaleza-1"},
-                {"provider": "Disney+ (Alternativo)","embed_url": "https://esportesembed.com/avai-x-fortaleza-2"},
-            ],
-        },
-        {
-            "id": "corinthians-x-sao-paulo",
-            "title": "Corinthians x São Paulo",
-            "description": "Brasileirão",
-            "poster": "https://i.imgur.com/99GwG0p.png",
-            "start_time": "2026-05-10 18:30:00",
-            "end_time": "2026-05-10 20:30:00",
-            "embeds": [
-                {"provider": "Prime Video",               "embed_url": "https://esportesembed.com/corinthians-x-sao-paulo-1"},
-                {"provider": "Prime Video (Alternativo)",  "embed_url": "https://esportesembed.com/corinthians-x-sao-paulo-2"},
-                {"provider": "Prime Video (Alternativo 2)","embed_url": "https://esportesembed.com/corinthians-x-sao-paulo-3"},
-            ],
-        },
-        {
-            "id": "santos-x-red-bull-bragantino",
-            "title": "Santos x Red Bull Bragantino",
-            "description": "Brasileirão",
-            "poster": "https://i.imgur.com/Yb2wTjQ.png",
-            "start_time": "2026-05-10 18:30:00",
-            "end_time": "2026-05-10 20:30:00",
-            "embeds": [
-                {"provider": "Premiere 3",            "embed_url": "https://esportesembed.com/santos-x-red-bull-bragantino-1"},
-                {"provider": "Premiere 3",            "embed_url": "https://esportesembed.com/santos-x-red-bull-bragantino-2"},
-                {"provider": "Premiere 3 (Alternativo)","embed_url": "https://esportesembed.com/santos-x-red-bull-bragantino-3"},
-            ],
-        },
-        {
-            "id": "gremio-x-flamengo",
-            "title": "Grêmio x Flamengo",
-            "description": "Brasileirão",
-            "poster": "https://i.imgur.com/wB5pjJ6.png",
-            "start_time": "2026-05-10 19:30:00",
-            "end_time": "2026-05-10 21:30:00",
-            "embeds": [
-                {"provider": "Premiere CLubes",               "embed_url": "https://esportesembed.com/gremio-x-flamengo-1"},
-                {"provider": "Premiere Clubes (Alternativo)",  "embed_url": "https://esportesembed.com/gremio-x-flamengo-2"},
-                {"provider": "Premiere Clubes (Alternativo 2)","embed_url": "https://esportesembed.com/gremio-x-flamengo-3"},
-            ],
-        },
-        {
-            "id": "novorizontino-x-botafogo-sp",
-            "title": "Novorizontino x Botafogo-SP",
-            "description": "Brasileirão Série B",
-            "poster": "https://i.imgur.com/wxz2TGq.jpeg",
-            "start_time": "2026-05-10 19:30:00",
-            "end_time": "2026-05-10 21:30:00",
-            "embeds": [
-                {"provider": "ESPN",    "embed_url": "https://esportesembed.com/novorizontino-x-botafogo-sp-1"},
-                {"provider": "Disney+", "embed_url": "https://esportesembed.com/novorizontino-x-botafogo-sp-2"},
-            ],
-        },
-    ]
-}
 
 @app.route("/games")
 def games():
-    if _MOCK_GAMES:
-        data = _MOCK_API_DATA
-    else:
-        try:
-            r = http_req.get(
-                _GAMES_API_URL,
-                timeout=8,
-            )
-            r.raise_for_status()
-            data = r.json()
-        except Exception as e:
-            app.logger.error("[games] erro ao buscar API: %s", e)
-            return jsonify([])
+    try:
+        r = http_req.get(_GAMES_API_URL, timeout=8)
+        r.raise_for_status()
+        data = r.json()
+    except Exception as e:
+        app.logger.error("[games] erro ao buscar API: %s", e)
+        return jsonify([])
 
     channel_list = _parse_channels()
     result = []
@@ -384,5 +312,103 @@ def favicon():
     return send_file(os.path.join(BASE_DIR, "static", "icons", "logo-48.png"), mimetype="image/png")
 
 
+_WARMUP_COOLDOWN = 300        # pausa de 5 min se parecer bloqueio de IP
+_WARMUP_CONSECUTIVE_FAIL = 3  # quantas falhas seguidas disparam o cooldown
+
+
+def _warmup_pass(channels: list, label: str) -> list:
+    """Resolve cada canal da lista. Retorna os que falharam."""
+    import random
+    failed = []
+    consecutive_fails = 0
+    random.shuffle(channels)
+    _log(f"[warmup] {label}: {len(channels)} canais...")
+    for i, ch in enumerate(channels, 1):
+        delay = random.uniform(7, 17)
+        _log(f"[warmup] {label} [{i}/{len(channels)}] aguardando {delay:.1f}s antes de resolver '{ch['name']}'...")
+        time.sleep(delay)
+        cached = _CACHE.get(ch["url"])
+        if cached and (time.time() - cached[0]) < _CACHE_TTL:
+            _log(f"[warmup] {label} [{i}/{len(channels)}] '{ch['name']}': cache válido, pulando")
+            consecutive_fails = 0
+            continue
+        _log(f"[warmup] {label} [{i}/{len(channels)}] resolvendo '{ch['name']}'...")
+        try:
+            result = resolve_stream(ch["url"])
+            if result.get("streams"):
+                _log(f"[warmup] {label} [{i}/{len(channels)}] '{ch['name']}': ok")
+                consecutive_fails = 0
+            else:
+                _log(f"[warmup] {label} [{i}/{len(channels)}] '{ch['name']}': falhou")
+                failed.append(ch)
+                consecutive_fails += 1
+        except Exception as e:
+            _log(f"[warmup] {label} [{i}/{len(channels)}] '{ch['name']}': erro - {e}")
+            failed.append(ch)
+            consecutive_fails += 1
+
+        if consecutive_fails >= _WARMUP_CONSECUTIVE_FAIL and i < len(channels):
+            _log(f"[warmup] {label} {consecutive_fails} falhas consecutivas — possível bloqueio de IP. Pausando {_WARMUP_COOLDOWN}s...")
+            time.sleep(_WARMUP_COOLDOWN)
+            consecutive_fails = 0
+
+    return failed
+
+
+_WARMUP_RETRY_DELAY = 600  # 10 minutos
+
+
+def _warmup_all_channels():
+    channels = _parse_channels()
+    failed = _warmup_pass(channels, "passe 1")
+
+    if failed:
+        _log(f"[warmup] {len(failed)} canal(is) falharam. Aguardando {_WARMUP_RETRY_DELAY}s para segundo passe...")
+        time.sleep(_WARMUP_RETRY_DELAY)
+        still_failed = _warmup_pass(failed, "passe 2")
+        if still_failed:
+            names = ", ".join(ch["name"] for ch in still_failed)
+            _log(f"[warmup] concluído com falhas: {names}")
+        else:
+            _log("[warmup] concluído — todos resolvidos no passe 2.")
+    else:
+        _log("[warmup] concluído — todos resolvidos no passe 1.")
+
+
+def _midnight_restart():
+    _log("[scheduler] reiniciando app (restart de 04h)...")
+    import sys
+    os.execv(sys.executable, [sys.executable] + sys.argv)
+
+
+_WARMUP_ENABLED = os.environ.get("WARMUP_ENABLED", "false").lower() == "true"
+
+
+def _start_scheduler():
+    from apscheduler.schedulers.background import BackgroundScheduler
+    from apscheduler.triggers.cron import CronTrigger
+    import pytz
+
+    tz = pytz.timezone("America/Sao_Paulo")
+    scheduler = BackgroundScheduler(timezone=tz)
+
+    if _WARMUP_ENABLED:
+        scheduler.add_job(_warmup_all_channels, CronTrigger(hour=7,  minute=0, timezone=tz), id="warmup_7h")
+        scheduler.add_job(_warmup_all_channels, CronTrigger(hour=12, minute=0, timezone=tz), id="warmup_12h")
+        _log("[scheduler] agendamentos ativos: warmup 07h, 12h | restart 04h (America/Sao_Paulo)")
+    else:
+        _log("[scheduler] warmup desativado (WARMUP_ENABLED=false) | restart 04h (America/Sao_Paulo)")
+
+    scheduler.add_job(_midnight_restart, CronTrigger(hour=4, minute=0, timezone=tz), id="restart_4h")
+    scheduler.start()
+
+    if _WARMUP_ENABLED:
+        from scraper import _IS_DEV
+        if _IS_DEV:
+            print("[scheduler] DEVELOPMENT: iniciando warmup imediato...")
+            threading.Thread(target=_warmup_all_channels, daemon=True).start()
+
+
 if __name__ == "__main__":
+    _start_scheduler()
     app.run(host="0.0.0.0", port=PORT, debug=False)

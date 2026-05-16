@@ -5,3 +5,5 @@ python-dotenv
 requests
 cryptography
 patchright
+apscheduler
+pytz
