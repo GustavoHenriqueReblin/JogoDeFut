@@ -86,20 +86,30 @@ def games():
 
     channel_list = _parse_channels()
     result = []
+    used_channels: set[str] = set()
 
     for game in data.get("data", []):
-        matched_embeds = []
+        seen_in_game: set[str] = set()
+        first_embed = None
         for embed in game.get("embeds", []):
             ch = _match_channel(embed.get("provider", ""), channel_list)
-            if ch:
-                matched_embeds.append({
-                    "provider": embed["provider"],
+            if not ch:
+                continue
+            key = _normalize(ch["name"])
+            if key in seen_in_game or key in used_channels:
+                continue
+            seen_in_game.add(key)
+            if first_embed is None:
+                first_embed = {
+                    "provider":    embed["provider"],
                     "channel_name": ch["name"],
                     "channel_url": _encrypt_url(ch["url"]),
-                })
+                }
 
-        if not matched_embeds:
+        if first_embed is None:
             continue
+
+        used_channels.add(_normalize(first_embed["channel_name"]))
 
         result.append({
             "id":          game["id"],
@@ -108,7 +118,7 @@ def games():
             "poster":      game.get("poster", ""),
             "start_time":  game.get("start_time", "")[:16],
             "end_time":    game.get("end_time", "")[:16],
-            "embeds":      matched_embeds,
+            "embeds":      [first_embed],
         })
 
     return jsonify(result)
