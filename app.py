@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 import os, urllib.parse, base64, secrets, time, threading, queue
+from collections import deque
+from datetime import datetime
 
 try:
     from dotenv import load_dotenv
@@ -21,15 +23,52 @@ logging.getLogger('apscheduler').setLevel(logging.WARNING)
 app = Flask(__name__)
 CORS(app)
 
-_ACTIVE_IPS: dict[str, float] = {}
+_RATE_EXEMPT = {"/proxy/ts", "/sw.js", "/favicon.ico", "/manifest.json"}
+
+@app.before_request
+def global_rate_limit():
+    if request.path in _RATE_EXEMPT or request.path.startswith("/static/"):
+        return
+    if _rate_check(_client_ip()):
+        return jsonify({"error": "rate_limit"}), 429
+
+_ACTIVE_IPS: dict[str, tuple[float, float]] = {}  # ip -> (first_seen, last_seen)
 _ACTIVE_LOCK = threading.Lock()
 _IP_TTL = 30
 _STATUS_SUBSCRIBERS: list[queue.Queue] = []
 _STATUS_LOCK = threading.Lock()
 
-BASE_DIR     = os.path.dirname(os.path.abspath(__file__))
-PORT         = int(os.environ.get("PORT", 5000))
-PROXY_SECRET = os.environ.get("PROXY_SECRET") or secrets.token_hex(16)
+BASE_DIR      = os.path.dirname(os.path.abspath(__file__))
+PORT          = int(os.environ.get("PORT", 5000))
+PROXY_SECRET  = os.environ.get("PROXY_SECRET") or secrets.token_hex(16)
+STATUS_TOKEN  = os.environ.get("STATUS_TOKEN", "")  # se vazio, /status é aberto
+
+# rate limiter: ip -> deque de timestamps
+_RATE_DATA: dict[str, deque] = {}
+_RATE_LOCK = threading.Lock()
+_RATE_WINDOW = 60    # segundos
+_RATE_LIMIT  = 120  # máx requisições por janela
+
+
+def _rate_check(ip: str) -> bool:
+    """Retorna True se a requisição deve ser bloqueada."""
+    now = time.time()
+    with _RATE_LOCK:
+        dq = _RATE_DATA.setdefault(ip, deque())
+        while dq and now - dq[0] > _RATE_WINDOW:
+            dq.popleft()
+        if len(dq) >= _RATE_LIMIT:
+            return True
+        dq.append(now)
+        return False
+
+
+def _status_auth() -> bool:
+    """Retorna True se a requisição tem autorização para acessar /status."""
+    if not STATUS_TOKEN:
+        return True
+    token = request.args.get("token") or request.headers.get("Authorization", "").removeprefix("Bearer ")
+    return token == STATUS_TOKEN
 
 def _decrypt_url(enc: str) -> str:
     data = base64.urlsafe_b64decode(enc + "==")
@@ -195,12 +234,16 @@ def stream():
         return "url inválida", 400
 
     ip = _client_ip()
+    now = time.time()
     with _ACTIVE_LOCK:
-        is_new = ip not in _ACTIVE_IPS or (time.time() - _ACTIVE_IPS[ip]) >= _IP_TTL
-        _ACTIVE_IPS[ip] = time.time()
+        existing = _ACTIVE_IPS.get(ip)
+        is_new = existing is None or (now - existing[1]) >= _IP_TTL
+        first_seen = now if is_new else existing[0]
+        _ACTIVE_IPS[ip] = (first_seen, now)
         if is_new:
-            active = sum(1 for t in _ACTIVE_IPS.values() if time.time() - t < _IP_TTL)
-            print(f"Novo IP ({ip}) conectado. Total ativos: ({active}).")
+            active = sum(1 for fs, ls in _ACTIVE_IPS.values() if now - ls < _IP_TTL)
+            ts = datetime.now().strftime("%d/%m %H:%M:%S")
+            print(f"[{ts}] Novo IP ({ip}) conectado. Total ativos: ({active}).")
             _push_status(active)
 
     try:
@@ -272,13 +315,41 @@ def _push_status(count: int):
             q.put_nowait(count)
 
 
+def _expiry_watcher():
+    """Monitora IPs expirados e notifica SSE quando o count muda."""
+    last_count = -1
+    while True:
+        time.sleep(10)
+        now = time.time()
+        with _ACTIVE_LOCK:
+            count = sum(1 for fs, ls in _ACTIVE_IPS.values() if now - ls < _IP_TTL)
+        if count != last_count:
+            last_count = count
+            _push_status(count)
+
+
+
+def _fmt_duration(seconds: float) -> str:
+    s = int(seconds)
+    if s < 60:
+        return f"{s}s"
+    if s < 3600:
+        return f"{s // 60}m {s % 60}s"
+    return f"{s // 3600}h {(s % 3600) // 60}m"
+
 
 @app.route("/status")
 def status():
+    if not _status_auth():
+        return jsonify({"error": "unauthorized"}), 401
     now = time.time()
     with _ACTIVE_LOCK:
-        active = [ip for ip, t in _ACTIVE_IPS.items() if now - t < _IP_TTL]
-    return jsonify({"devices": len(active)})
+        active = [
+            {"ip": ip, "connected_for": _fmt_duration(now - fs)}
+            for ip, (fs, ls) in _ACTIVE_IPS.items()
+            if now - ls < _IP_TTL
+        ]
+    return jsonify({"devices": len(active), "clients": active})
 
 
 @app.route("/status/stream")
@@ -290,7 +361,7 @@ def status_stream():
     def generate():
         now = time.time()
         with _ACTIVE_LOCK:
-            count = sum(1 for t in _ACTIVE_IPS.values() if now - t < _IP_TTL)
+            count = sum(1 for fs, ls in _ACTIVE_IPS.values() if now - ls < _IP_TTL)
         yield f"data: {count}\n\n"
         try:
             while True:
@@ -424,5 +495,6 @@ def _start_scheduler():
 
 
 if __name__ == "__main__":
+    threading.Thread(target=_expiry_watcher, daemon=True).start()
     _start_scheduler()
     app.run(host="0.0.0.0", port=PORT, debug=False)

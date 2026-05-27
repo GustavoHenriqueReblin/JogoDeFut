@@ -16,3 +16,4 @@ instance/
 domains.txt
 /.claude
 .claude/settings.local.json
+cache.json

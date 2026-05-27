@@ -1,4 +1,4 @@
-import os, re, asyncio, time, threading, sys
+import os, re, asyncio, time, threading, sys, json
 import requests as _http
 from patchright.async_api import async_playwright
 
@@ -6,7 +6,8 @@ _IS_DEV = os.environ.get("ENVIRONMENT", "DEVELOPMENT").upper() != "PRODUCTION"
 
 def _log(msg: str):
     if _IS_DEV:
-        print(msg)
+        from datetime import datetime
+        print(f"[{datetime.now().strftime('%d/%m %H:%M:%S')}] {msg}")
 
 _CLOUDFLAIRE_PLAYERS = {
     k: v
@@ -24,9 +25,41 @@ _HEADERS = {"User-Agent": _UA, "Accept-Language": "pt-BR,pt;q=0.9"}
 _HEADLESS = os.environ.get("HEADLESS_DEBUG", "").lower() != "true"
 
 _CACHE: dict[str, tuple[float, dict]] = {}
-_CACHE_TTL = 86400  # 24 horas
+_CACHE_TTL = 43200  # 12 horas
 _LOCKS: dict[str, threading.Lock] = {}
 _LOCKS_META = threading.Lock()
+
+_CACHE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "cache.json")
+_CACHE_WRITE_LOCK = threading.Lock()
+
+
+def _load_cache():
+    try:
+        with open(_CACHE_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        now = time.time()
+        loaded = 0
+        for url, (ts, result) in data.items():
+            if now - ts < _CACHE_TTL:
+                _CACHE[url] = (ts, result)
+                loaded += 1
+        _log(f"[cache] {loaded} entradas carregadas do disco ({len(data) - loaded} expiradas ignoradas)")
+    except FileNotFoundError:
+        pass
+    except Exception as e:
+        _log(f"[cache] erro ao carregar cache do disco: {e}")
+
+
+def _save_cache():
+    try:
+        with _CACHE_WRITE_LOCK:
+            with open(_CACHE_FILE, "w", encoding="utf-8") as f:
+                json.dump({url: [ts, result] for url, (ts, result) in _CACHE.items()}, f)
+    except Exception as e:
+        _log(f"[cache] erro ao salvar cache no disco: {e}")
+
+
+_load_cache()
 
 
 async def _scrape_token(page_url: str) -> str | None:
@@ -138,6 +171,7 @@ def resolve_stream(player_url: str) -> dict:
         if result.get("streams"):
             _CACHE[player_url] = (time.time(), result)
             _log(f"[scraper] resultado salvo em cache por {_CACHE_TTL}s")
+            threading.Thread(target=_save_cache, daemon=True).start()
         return result
     finally:
         lock.release()
