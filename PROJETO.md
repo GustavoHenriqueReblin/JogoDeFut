@@ -57,7 +57,7 @@ app.py (Flask)
 | `PROXY_SECRET` | Não | Chave hex para encriptar URLs (gerada automaticamente se ausente) |
 | `PORT` | Não | Porta do servidor (padrão: 5000) |
 | `ENVIRONMENT` | Não | `PRODUCTION` desliga logs de debug. Qualquer outro valor (padrão `DEVELOPMENT`) habilita logs. |
-| `WARMUP_ENABLED` | Não | `true` habilita warmup automático dos canais às 07h e 12h |
+| `WARMUP_ENABLED` | Não | `true` habilita warmup automático dos canais às 07h |
 | `HEADLESS_DEBUG` | Não | `true` abre o browser visível durante scraping (útil para debug local) |
 | `STATUS_TOKEN` | Não | Token de acesso às rotas `/status` e `/status/stream`. Se vazio, rotas ficam abertas. Passar via `?token=X` ou header `Authorization: Bearer X` |
 
@@ -152,7 +152,7 @@ Roda em background thread com timezone `America/Sao_Paulo`:
 |---|---|
 | 04h00 | Reinício do processo via `os.execv` |
 | 07h00 | Warmup de todos os canais (se `WARMUP_ENABLED=true`) |
-| 12h00 | Warmup de todos os canais (se `WARMUP_ENABLED=true`) |
+| 12h00 | *(removido — cache de 12h ainda válido nesse horário)* |
 
 O warmup em dev (`ENVIRONMENT != PRODUCTION`) dispara imediatamente ao subir.
 
@@ -310,4 +310,5 @@ Thread `_expiry_watcher` roda a cada 10s e compara o count de IPs ativos. Se mud
 - [ ] **`/health` endpoint** — rota simples para monitoramento externo (uptime bots, load balancer). Retornar `{"ok": true}`
 - [ ] **Logs estruturados** — atualmente só stdout sem nível. Considerar `logging` com níveis INFO/WARNING/ERROR para filtrar em produção
 - [ ] **Métricas por canal** — contador de quantas vezes cada canal foi resolvido / falhou (útil para detectar canais problemáticos)
-- [ ] **Warmup paralelo** — atualmente resolve canais em série com delays 7–17s. Pool de 2–3 workers paralelos reduziria o tempo total mantendo os locks por URL já existentes
+- [x] **Warmup paralelo** — refatorado com `ThreadPoolExecutor`; `_WARMUP_WORKERS=1` por padrão (serial — paralelo aumenta suspeita no mesmo IP). Arquitetura pronta para escalar com proxies rotativos
+- [x] **Warmup desalinhado com o cache histórico** — `_warmup_pass` e rota `/resolve` agora usam `_latest_valid()` do `scraper.py`; imports `_CACHE`/`_CACHE_TTL` removidos do `app.py`

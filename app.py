@@ -14,7 +14,7 @@ from flask_cors import CORS
 import requests as http_req
 
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
-from scraper import resolve_stream, _CACHE, _CACHE_TTL, _log
+from scraper import resolve_stream, _latest_valid, _log
 
 import logging
 logging.getLogger('werkzeug').setLevel(logging.ERROR)
@@ -179,8 +179,7 @@ def resolve_start():
     except Exception:
         return jsonify({"status": "error"}), 400
 
-    cached = _CACHE.get(channel_url)
-    if cached and (time.time() - cached[0]) < _CACHE_TTL:
+    if _latest_valid(channel_url):
         _RESOLVE_STATUS[raw] = "ready"
         return jsonify({"status": "ready"})
 
@@ -399,45 +398,59 @@ def favicon():
 
 _WARMUP_COOLDOWN = 300        # pausa de 5 min se parecer bloqueio de IP
 _WARMUP_CONSECUTIVE_FAIL = 3  # quantas falhas seguidas disparam o cooldown
+_WARMUP_WORKERS = 1           # serial por padrão — paralelo aumenta suspeita no mesmo IP
 
 
 def _warmup_pass(channels: list, label: str) -> list:
-    """Resolve cada canal da lista. Retorna os que falharam."""
+    """Resolve canais em paralelo. Retorna os que falharam."""
     import random
-    failed = []
-    consecutive_fails = 0
+    from concurrent.futures import ThreadPoolExecutor
+
+    channels = list(channels)
     random.shuffle(channels)
-    _log(f"[warmup] {label}: {len(channels)} canais...")
-    for i, ch in enumerate(channels, 1):
-        delay = random.uniform(7, 17)
-        _log(f"[warmup] {label} [{i}/{len(channels)}] aguardando {delay:.1f}s antes de resolver '{ch['name']}'...")
-        time.sleep(delay)
-        cached = _CACHE.get(ch["url"])
-        if cached and (time.time() - cached[0]) < _CACHE_TTL:
-            _log(f"[warmup] {label} [{i}/{len(channels)}] '{ch['name']}': cache válido, pulando")
-            consecutive_fails = 0
-            continue
-        _log(f"[warmup] {label} [{i}/{len(channels)}] resolvendo '{ch['name']}'...")
+    total = len(channels)
+    _log(f"[warmup] {label}: {total} canais ({_WARMUP_WORKERS} workers)...")
+
+    wfc: dict[int, int] = {}   # thread ident → contagem de falhas consecutivas
+    wfc_lock = threading.Lock()
+
+    def _resolve_one(item):
+        i, ch = item
+        tid = threading.current_thread().ident
+        time.sleep(random.uniform(7, 17))
+
+        if _latest_valid(ch["url"]):
+            _log(f"[warmup] {label} [{i}/{total}] '{ch['name']}': cache válido, pulando")
+            with wfc_lock:
+                wfc[tid] = 0
+            return None
+
+        _log(f"[warmup] {label} [{i}/{total}] resolvendo '{ch['name']}'...")
+        ok = False
         try:
-            result = resolve_stream(ch["url"])
-            if result.get("streams"):
-                _log(f"[warmup] {label} [{i}/{len(channels)}] '{ch['name']}': ok")
-                consecutive_fails = 0
-            else:
-                _log(f"[warmup] {label} [{i}/{len(channels)}] '{ch['name']}': falhou")
-                failed.append(ch)
-                consecutive_fails += 1
+            ok = bool(resolve_stream(ch["url"]).get("streams"))
         except Exception as e:
-            _log(f"[warmup] {label} [{i}/{len(channels)}] '{ch['name']}': erro - {e}")
-            failed.append(ch)
-            consecutive_fails += 1
+            _log(f"[warmup] {label} [{i}/{total}] '{ch['name']}': erro - {e}")
 
-        if consecutive_fails >= _WARMUP_CONSECUTIVE_FAIL and i < len(channels):
-            _log(f"[warmup] {label} {consecutive_fails} falhas consecutivas — possível bloqueio de IP. Pausando {_WARMUP_COOLDOWN}s...")
+        if ok:
+            _log(f"[warmup] {label} [{i}/{total}] '{ch['name']}': ok")
+            with wfc_lock:
+                wfc[tid] = 0
+            return None
+
+        _log(f"[warmup] {label} [{i}/{total}] '{ch['name']}': falhou")
+        with wfc_lock:
+            wfc[tid] = wfc.get(tid, 0) + 1
+            consec = wfc[tid]
+        if consec >= _WARMUP_CONSECUTIVE_FAIL:
+            _log(f"[warmup] {label} worker — {consec} falhas consecutivas, pausando {_WARMUP_COOLDOWN}s...")
             time.sleep(_WARMUP_COOLDOWN)
-            consecutive_fails = 0
+            with wfc_lock:
+                wfc[tid] = 0
+        return ch
 
-    return failed
+    with ThreadPoolExecutor(max_workers=_WARMUP_WORKERS) as pool:
+        return [ch for ch in pool.map(_resolve_one, enumerate(channels, 1)) if ch is not None]
 
 
 _WARMUP_RETRY_DELAY = 600  # 10 minutos
@@ -462,8 +475,7 @@ def _warmup_all_channels():
 
 def _midnight_restart():
     _log("[scheduler] reiniciando app (restart de 04h)...")
-    import sys
-    os.execv(sys.executable, [sys.executable] + sys.argv)
+    os._exit(0)  # hard-exit: systemd reinicia o processo; os.execv herdava o socket e conflitava com a porta
 
 
 _WARMUP_ENABLED = os.environ.get("WARMUP_ENABLED", "false").lower() == "true"
@@ -478,9 +490,8 @@ def _start_scheduler():
     scheduler = BackgroundScheduler(timezone=tz)
 
     if _WARMUP_ENABLED:
-        scheduler.add_job(_warmup_all_channels, CronTrigger(hour=7,  minute=0, timezone=tz), id="warmup_7h")
-        scheduler.add_job(_warmup_all_channels, CronTrigger(hour=12, minute=0, timezone=tz), id="warmup_12h")
-        _log("[scheduler] agendamentos ativos: warmup 07h, 12h | restart 04h (America/Sao_Paulo)")
+        scheduler.add_job(_warmup_all_channels, CronTrigger(hour=7, minute=0, timezone=tz), id="warmup_7h")
+        _log("[scheduler] agendamentos ativos: warmup 07h | restart 04h (America/Sao_Paulo)")
     else:
         _log("[scheduler] warmup desativado (WARMUP_ENABLED=false) | restart 04h (America/Sao_Paulo)")
 
