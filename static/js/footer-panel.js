@@ -191,25 +191,31 @@ class FooterPanel {
     });
 
     // Mobile: swipe + tap handling
-    let _ty0 = null;
+    let _tx0 = null, _ty0 = null;
     this.container.addEventListener('touchstart', e => {
+      _tx0 = e.touches[0].clientX;
       _ty0 = e.touches[0].clientY;
     }, { passive: true });
     this.container.addEventListener('touchend', e => {
       if (_ty0 === null) return;
+      const dx = _tx0 - e.changedTouches[0].clientX;
       const dy = _ty0 - e.changedTouches[0].clientY;
       _touchHandled = true;
 
-      if (dy > 50 && !this._open) {
+      if (Math.abs(dx) > Math.abs(dy) && Math.abs(dx) > 50) {
+        // swipe horizontal: troca canal
+        this._navigateChannel(dx > 0 ? 1 : -1);
+      } else if (dy > 50 && !this._open) {
         this.open();
       } else if (dy < -50 && this._open) {
         this.close();
-      } else if (Math.abs(dy) < 10 && !this.el.contains(e.target)) {
+      } else if (Math.abs(dy) < 10 && Math.abs(dx) < 10 && !this.el.contains(e.target)) {
         // tap outside footer: toggle visibility
         this.el.classList.contains('visible') ? this._hideAll() : this._show();
       } else {
         _touchHandled = false;
       }
+      _tx0 = null;
       _ty0 = null;
     }, { passive: true });
   }
@@ -268,14 +274,18 @@ class FooterPanel {
 
   _renderCards() {
     this.scrollEl.innerHTML = '';
-    this._games.forEach(g   => this._appendGameCard(g));
-    if (this._games.length && this._channels.length) {
+    this._games.forEach(g => this._appendGameCard(g));
+
+    const usedUrls = new Set(this._games.map(g => g.embeds[0].channel_url));
+    const freeChannels = this._channels.filter(ch => !usedUrls.has(ch.url));
+
+    if (this._games.length && freeChannels.length) {
       const sep = document.createElement('div');
       sep.className = 'footer-separator';
       this.scrollEl.appendChild(sep);
     }
-    this._channels.forEach(ch => this._appendChannelCard(ch));
-    if (!this._games.length && !this._channels.length) {
+    freeChannels.forEach(ch => this._appendChannelCard(ch));
+    if (!this._games.length && !freeChannels.length) {
       this.scrollEl.innerHTML = '<span class="footer-empty">Nenhum conteúdo disponível</span>';
     }
   }
@@ -323,6 +333,25 @@ class FooterPanel {
       this.close();
     });
     this.scrollEl.appendChild(card);
+  }
+
+  _navigateChannel(dir) {
+    const usedUrls = new Set(this._games.map(g => g.embeds[0].channel_url));
+    const items = [
+      ...this._games.map(g => ({
+        name: g.embeds[0].channel_name,
+        url:  g.embeds[0].channel_url,
+        meta: { type: 'game', channelName: g.embeds[0].channel_name,
+                title: g.title, desc: g.description || '', time: g.start_time.slice(11, 16) },
+      })),
+      ...this._channels
+        .filter(ch => !usedUrls.has(ch.url))
+        .map(ch => ({ name: ch.name, url: ch.url, meta: null })),
+    ];
+    if (!items.length) return;
+    const idx = items.findIndex(it => it.url === this._activeUrl);
+    const next = items[(idx + dir + items.length) % items.length];
+    this.onSelect(next.name, next.url, next.meta);
   }
 
   /* ── State ───────────────────────────────────────────────── */

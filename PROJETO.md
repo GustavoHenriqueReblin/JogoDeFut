@@ -57,7 +57,7 @@ app.py (Flask)
 | `PROXY_SECRET` | Não | Chave hex para encriptar URLs (gerada automaticamente se ausente) |
 | `PORT` | Não | Porta do servidor (padrão: 5000) |
 | `ENVIRONMENT` | Não | `PRODUCTION` desliga logs de debug. Qualquer outro valor (padrão `DEVELOPMENT`) habilita logs. |
-| `WARMUP_ENABLED` | Não | `true` habilita warmup automático dos canais às 07h |
+| `WARMUP_ENABLED` | Não | `true` habilita warmup automático dos canais às 07h e 13h |
 | `HEADLESS_DEBUG` | Não | `true` abre o browser visível durante scraping (útil para debug local) |
 | `STATUS_TOKEN` | Não | Token de acesso às rotas `/status` e `/status/stream`. Se vazio, rotas ficam abertas. Passar via `?token=X` ou header `Authorization: Bearer X` |
 
@@ -150,11 +150,13 @@ Roda em background thread com timezone `America/Sao_Paulo`:
 
 | Horário | Job |
 |---|---|
-| 04h00 | Reinício do processo via `os.execv` |
-| 07h00 | Warmup de todos os canais (se `WARMUP_ENABLED=true`) |
-| 12h00 | *(removido — cache de 12h ainda válido nesse horário)* |
+| 04h00 | Reinício via `os._exit(0)` — systemd reinicia o processo; porta é liberada antes da nova instância subir |
+| 07h00 | Warmup de todos os canais (se `WARMUP_ENABLED=true`) — cobre jogos europeus (08h–17h) |
+| 13h00 | Warmup de todos os canais (se `WARMUP_ENABLED=true`) — cobre jogos sul-americanos (16h–23h) |
 
 O warmup em dev (`ENVIRONMENT != PRODUCTION`) dispara imediatamente ao subir.
+
+**Lógica de skip no warmup:** para cada canal, faz HEAD request (timeout 3s) na URL em cache. Se 2xx → pula. Se 4xx/erro ou sem cache → evicta e re-resolve. Garante que após restart com `cache.json` do dia anterior, URLs mortas são detectadas e substituídas.
 
 ---
 
@@ -182,8 +184,9 @@ O warmup em dev (`ENVIRONMENT != PRODUCTION`) dispara imediatamente ao subir.
 - **Controles**: mute + volume slider (esquerda, `width:110px`) | info do jogo/canal (centro, `flex:1`) | fullscreen (direita, `width:110px`) — larguras iguais garantem centro matematicamente centralizado
 - **Toggle "CANAIS E JOGOS"**: strip com degradê lateral (transparent→escuro→transparent). Quando aberto, fundo sólido aparece via `::before opacity` (assimétrico: 0.5s abrir, 2s fechar). Sem fundo quando painel fechado
 - **Abertura/fechamento do painel**: clique no toggle | swipe up/down (touch)
+- **Troca de canal por swipe**: swipe left/right no vídeo (touch) — navega pela lista ordenada (jogos → canais livres) em loop. Detectado quando `|dx| > |dy|` e `|dx| > 50px`, evitando conflito com swipe vertical
 - **Visibilidade dos controles**: aparece no carregamento (aberto), mousemove mostra por 2s, clique no vídeo faz toggle show/hide. No mobile, tap detectado no `touchend` com flag `_touchHandled` (o `click` é interceptado pelo Plyr quando `pointer-events:none`)
-- **Conteúdo**: skeleton loading (4 game cards + 8 channel cards com shimmer) até dados carregarem; depois jogos, separador, canais
+- **Conteúdo**: skeleton loading (4 game cards + 8 channel cards com shimmer) até dados carregarem; depois jogos, separador, canais livres (canais já presentes em algum jogo são ocultados)
 - Abre automaticamente na carga da página (`open()` no constructor)
 
 **Troca de canal — sequência exata:**
@@ -256,17 +259,22 @@ apscheduler, pytz
 
 O `_CACHE` do `scraper.py` é salvo em `cache.json` na raiz do projeto.
 
-- **Estrutura:** `dict[str, list[tuple[float, dict]]]` — lista de entradas por URL (histórico completo)
-- **Sempre appenda**, nunca sobrescreve — cada resolve bem-sucedido adiciona uma entrada nova
-- **Carregado no import** do módulo — carrega tudo sem filtrar por TTL (histórico integral preservado)
-- **Salvo em background thread** após cada resolve bem-sucedido (não bloqueia a resposta)
-- **Cache hit:** `_latest_valid()` percorre a lista de trás pra frente e retorna a entrada mais recente dentro do TTL (12h)
-- **Formato JSON:** `{ "player_url": [[timestamp, result_dict], [timestamp, result_dict], ...] }`
-- **TTL:** 12h (`_CACHE_TTL = 43200`) — define apenas se a entrada é considerada "ativa" para hit; entradas antigas ficam no histórico
-- **Sem limpeza automática** — objetivo é rastrear todas as URLs de stream já obtidas por canal
+- **Estrutura em memória:** `dict[str, tuple[float, dict]]` — uma entrada por canal (mais recente)
+- **Sobrescreve** a entrada anterior a cada novo resolve bem-sucedido
+- **Carregado no import** do módulo
+- **Salvo em background thread** após cada resolve (não bloqueia a resposta)
+- **Cache hit:** `_latest_valid()` retorna a entrada se dentro do TTL (12h), `None` caso contrário
+- **`_save_cache`** só persiste entradas ainda válidas (dentro do TTL) — `cache.json` nunca acumula entradas expiradas
+- **Formato JSON:** `{ "player_url": [timestamp, result_dict] }`
+- **TTL:** 12h (`_CACHE_TTL = 43200`)
 - Reiniciar o app não perde o cache — streams já resolvidos ficam disponíveis imediatamente
 
-> `cache.json` deve estar no `.gitignore` (contém URLs internas dos streams).
+**Histórico de streams (`stream_log.txt`):** a cada novo resolve bem-sucedido, uma linha é appendada na raiz do projeto:
+```
+[2026-05-29 14:32:10] https://.../tv/espn | https://cdn.cloudflaire.lat/.../style.css | referer: https://.../tv/espn
+```
+
+> `cache.json` e `stream_log.txt` devem estar no `.gitignore` (contêm URLs internas dos streams).
 
 ---
 
@@ -295,7 +303,7 @@ Thread `_expiry_watcher` roda a cada 10s e compara o count de IPs ativos. Se mud
 - **Lock por URL no scraper:** impede múltiplos browsers simultâneos para o mesmo canal. Timeout de 90s.
 - **Resolve assíncrono:** o frontend não bloqueia — dispara o resolve e faz polling, permitindo troca de canal enquanto resolve.
 - **Reescrita dos segmentos m3u8:** necessária para que o browser busque os `.ts` via proxy (evita CORS e headers de autenticação do servidor original).
-- **Cache histórico sem limpeza:** além de servir hits (TTL 12h), o cache acumula todas as URLs de stream já obtidas por canal para rastreamento e eventual fallback futuro.
+- **Cache por canal (entrada única):** uma entrada por canal, sobrescrita a cada novo resolve. `cache.json` só persiste entradas válidas. Histórico completo em `stream_log.txt`.
 - **IP TTL de 30s:** considera dispositivo ativo enquanto está consumindo o stream (HLS.js bate o servidor a cada ~2-6s).
 - **Rate limit sem dependência externa:** implementado com `deque` da stdlib, sem Flask-Limiter ou Redis.
 
@@ -303,12 +311,9 @@ Thread `_expiry_watcher` roda a cada 10s e compara o count de IPs ativos. Se mud
 
 ## TODO
 
-- [ ] **Ocultar canais já presentes nos jogos** — se um canal está listado em pelo menos um embed de jogo ativo, não exibi-lo na lista de canais avulsos. Ex: ESPN transmitindo Flamengo x São Paulo → ESPN some dos canais, o jogo já o representa
-- [ ] **Validação de cache antes de servir** — cache de 12h pode servir URL de stream morta. Fazer HEAD request na URL antes de retornar do cache
+- [ ] **Validação de cache antes de servir** — warmup já valida via HEAD antes de cada resolve; `/stream` ainda serve diretamente do cache sem validar
 - [ ] **Jogos sem canal disponível** — backend filtra e não exibe. Avaliar mostrar como cards cinza com tooltip "Sem canal disponível" para o usuário saber que o jogo existe mas não tem transmissão configurada
 - [ ] **`_RESOLVE_STATUS` cresce indefinidamente** — nunca é limpo. Adicionar TTL ou LRU com limite de entradas
 - [ ] **`/health` endpoint** — rota simples para monitoramento externo (uptime bots, load balancer). Retornar `{"ok": true}`
 - [ ] **Logs estruturados** — atualmente só stdout sem nível. Considerar `logging` com níveis INFO/WARNING/ERROR para filtrar em produção
 - [ ] **Métricas por canal** — contador de quantas vezes cada canal foi resolvido / falhou (útil para detectar canais problemáticos)
-- [x] **Warmup paralelo** — refatorado com `ThreadPoolExecutor`; `_WARMUP_WORKERS=1` por padrão (serial — paralelo aumenta suspeita no mesmo IP). Arquitetura pronta para escalar com proxies rotativos
-- [x] **Warmup desalinhado com o cache histórico** — `_warmup_pass` e rota `/resolve` agora usam `_latest_valid()` do `scraper.py`; imports `_CACHE`/`_CACHE_TTL` removidos do `app.py`

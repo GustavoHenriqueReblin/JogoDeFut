@@ -14,7 +14,7 @@ from flask_cors import CORS
 import requests as http_req
 
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
-from scraper import resolve_stream, _latest_valid, _log
+from scraper import resolve_stream, _latest_valid, _evict_cache, _log
 
 import logging
 logging.getLogger('werkzeug').setLevel(logging.ERROR)
@@ -402,7 +402,7 @@ _WARMUP_WORKERS = 1           # serial por padrão — paralelo aumenta suspeita
 
 
 def _warmup_pass(channels: list, label: str) -> list:
-    """Resolve canais em paralelo. Retorna os que falharam."""
+    """Resolve canais serialmente. Retorna os que falharam."""
     import random
     from concurrent.futures import ThreadPoolExecutor
 
@@ -419,11 +419,24 @@ def _warmup_pass(channels: list, label: str) -> list:
         tid = threading.current_thread().ident
         time.sleep(random.uniform(7, 17))
 
-        if _latest_valid(ch["url"]):
-            _log(f"[warmup] {label} [{i}/{total}] '{ch['name']}': cache válido, pulando")
-            with wfc_lock:
-                wfc[tid] = 0
-            return None
+        hit = _latest_valid(ch["url"])
+        if hit:
+            stream_url = (hit[1].get("streams") or [{}])[0].get("url", "")
+            alive = False
+            if stream_url:
+                try:
+                    r = http_req.head(stream_url, timeout=3, allow_redirects=True)
+                    alive = r.status_code < 400
+                except Exception:
+                    pass
+            if alive:
+                _log(f"[warmup] {label} [{i}/{total}] '{ch['name']}': URL viva, pulando")
+                with wfc_lock:
+                    wfc[tid] = 0
+                return None
+            age_h = (time.time() - hit[0]) / 3600
+            _log(f"[warmup] {label} [{i}/{total}] '{ch['name']}': URL morta (cache {age_h:.1f}h), re-resolvendo...")
+            _evict_cache(ch["url"])
 
         _log(f"[warmup] {label} [{i}/{total}] resolvendo '{ch['name']}'...")
         ok = False
@@ -490,8 +503,9 @@ def _start_scheduler():
     scheduler = BackgroundScheduler(timezone=tz)
 
     if _WARMUP_ENABLED:
-        scheduler.add_job(_warmup_all_channels, CronTrigger(hour=7, minute=0, timezone=tz), id="warmup_7h")
-        _log("[scheduler] agendamentos ativos: warmup 07h | restart 04h (America/Sao_Paulo)")
+        scheduler.add_job(_warmup_all_channels, CronTrigger(hour=7,  minute=0, timezone=tz), id="warmup_7h")
+        scheduler.add_job(_warmup_all_channels, CronTrigger(hour=13, minute=0, timezone=tz), id="warmup_13h")
+        _log("[scheduler] agendamentos ativos: warmup 07h, 13h | restart 04h (America/Sao_Paulo)")
     else:
         _log("[scheduler] warmup desativado (WARMUP_ENABLED=false) | restart 04h (America/Sao_Paulo)")
 

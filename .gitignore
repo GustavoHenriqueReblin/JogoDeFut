@@ -17,3 +17,4 @@ domains.txt
 /.claude
 .claude/settings.local.json
 cache.json
+stream_log.txt
