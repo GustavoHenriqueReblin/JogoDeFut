@@ -33,7 +33,12 @@ app.py (Flask)
 |---|---|
 | `app.py` | Servidor Flask — rotas, proxy, cache de IPs ativos, scheduler |
 | `scraper.py` | Scraping do token Cloudflare Turnstile + chamada à API externa |
-| `templates/player.html` | Frontend completo (HTML + CSS + JS inline) |
+| `templates/player.html` | Shell HTML — importa CSS/JS externos, sem lógica inline |
+| `static/css/player.css` | Estilos base: body, video-wrap, overlay, info-bar, Plyr overrides |
+| `static/css/footer-panel.css` | Estilos do footer panel e seus cards de jogos/canais |
+| `static/js/player-core.js` | Classe `PlayerCore` — Plyr, HLS.js, selectChannel, overlay |
+| `static/js/footer-panel.js` | Classe `FooterPanel` — painel deslizante de jogos e canais |
+| `static/js/app.js` | Init — instancia PlayerCore + FooterPanel, carrega dados da API |
 | `manifest.json` | PWA manifest |
 | `sw.js` | Service Worker — cache offline dos assets estáticos |
 | `requirements.txt` | Dependências Python |
@@ -153,7 +158,12 @@ O warmup em dev (`ENVIRONMENT != PRODUCTION`) dispara imediatamente ao subir.
 
 ---
 
-## Frontend (player.html)
+## Frontend
+
+**Arquitetura de componentes (sem bundler):**
+- `player-core.js` → classe `PlayerCore` — tudo relativo a Plyr, HLS.js e polling de stream
+- `footer-panel.js` → classe `FooterPanel` — UI do painel deslizante
+- `app.js` → init global — instancia as classes, carrega dados da API, conecta callbacks
 
 **Bibliotecas:**
 - Plyr 3.7.8 (player customizado) — controles: mute, volume, fullscreen
@@ -164,8 +174,17 @@ O warmup em dev (`ENVIRONMENT != PRODUCTION`) dispara imediatamente ao subir.
 - Ao entrar em fullscreen, trava orientação em landscape (`screen.orientation.lock('landscape')`)
 - Ao sair do fullscreen, destrava
 - Troca de canal aborta o polling anterior (`_currentUrl !== url`)
-- Botões de canal com logo `.webp` + fallback sem logo
-- Cards de jogos com poster, título, horário e canal
+- Não há mais seção de canais/jogos abaixo do player — tudo está dentro do footer panel
+
+**Footer Panel:**
+- UI customizada dentro do `.video-wrap` (position absolute, z-index 20) — Plyr roda com `controls:[]`
+- Três seções com `position:absolute` próprio: `.footer-body` (cards), `.footer-toggle` (strip), `.footer-controls` (barra de controles)
+- **Controles**: mute + volume slider (esquerda, `width:110px`) | info do jogo/canal (centro, `flex:1`) | fullscreen (direita, `width:110px`) — larguras iguais garantem centro matematicamente centralizado
+- **Toggle "CANAIS E JOGOS"**: strip com degradê lateral (transparent→escuro→transparent). Quando aberto, fundo sólido aparece via `::before opacity` (assimétrico: 0.5s abrir, 2s fechar). Sem fundo quando painel fechado
+- **Abertura/fechamento do painel**: clique no toggle | swipe up/down (touch)
+- **Visibilidade dos controles**: aparece no carregamento (aberto), mousemove mostra por 2s, clique no vídeo faz toggle show/hide. No mobile, tap detectado no `touchend` com flag `_touchHandled` (o `click` é interceptado pelo Plyr quando `pointer-events:none`)
+- **Conteúdo**: skeleton loading (4 game cards + 8 channel cards com shimmer) até dados carregarem; depois jogos, separador, canais
+- Abre automaticamente na carga da página (`open()` no constructor)
 
 **Troca de canal — sequência exata:**
 1. `selectChannel(name, url, meta)` muta o player imediatamente (`player.muted = true`)
@@ -198,10 +217,7 @@ O warmup em dev (`ENVIRONMENT != PRODUCTION`) dispara imediatamente ao subir.
 - Quando o usuário clica num botão de canal, `selectChannel` faz lookup em `_games` para verificar se há jogo naquele canal e exibe infos completas se encontrar
 - Gradiente de fundo dos controles mais escuro (`rgba(0,0,0,.95)`) para garantir legibilidade
 
-**Mock de jogos (desenvolvimento):**
-- Se `/games` retornar lista vazia, `loadGames` usa `_buildMockGames(channels)` como fallback
-- 2 mocks: os URLs reais dos 2 primeiros canais carregados (funcionam com cache); posters via imgur
-- `loadGames` aguarda `_channelsReady` (Promise) antes de construir os mocks, garantindo coordenação com `init()`
+**Mock de jogos:** removido. `/games` retornando vazio ou falhando resulta em lista vazia — nenhum fallback.
 
 **Logos disponíveis:** Band Sports, ESPN, ESPN 2, ESPN 4, Globo, Paramount+, Premiere, Premiere 2, Premiere 3, Prime Video, SBT, SporTV, SporTV 2, TNT, RecordTV, Disney+
 
@@ -240,48 +256,25 @@ apscheduler, pytz
 
 O `_CACHE` do `scraper.py` é salvo em `cache.json` na raiz do projeto.
 
-- **Carregado no import** do módulo — entradas expiradas são ignoradas na leitura
+- **Estrutura:** `dict[str, list[tuple[float, dict]]]` — lista de entradas por URL (histórico completo)
+- **Sempre appenda**, nunca sobrescreve — cada resolve bem-sucedido adiciona uma entrada nova
+- **Carregado no import** do módulo — carrega tudo sem filtrar por TTL (histórico integral preservado)
 - **Salvo em background thread** após cada resolve bem-sucedido (não bloqueia a resposta)
-- **Formato:** JSON `{ "player_url": [timestamp, result_dict] }`
-- **TTL:** 12h (`_CACHE_TTL = 43200`)
+- **Cache hit:** `_latest_valid()` percorre a lista de trás pra frente e retorna a entrada mais recente dentro do TTL (12h)
+- **Formato JSON:** `{ "player_url": [[timestamp, result_dict], [timestamp, result_dict], ...] }`
+- **TTL:** 12h (`_CACHE_TTL = 43200`) — define apenas se a entrada é considerada "ativa" para hit; entradas antigas ficam no histórico
+- **Sem limpeza automática** — objetivo é rastrear todas as URLs de stream já obtidas por canal
 - Reiniciar o app não perde o cache — streams já resolvidos ficam disponíveis imediatamente
 
 > `cache.json` deve estar no `.gitignore` (contém URLs internas dos streams).
 
 ---
 
-## Atalhos de teclado / controle remoto
-
-Funciona em PC e TVs com controle que emite eventos de teclado (Android TV, Fire TV etc.).
+## Atalhos de teclado
 
 | Tecla | Ação |
 |---|---|
-| `→` `↓` `CH+` (keyCode 427) | Avança na lista unificada (jogos → canais em loop) |
-| `←` `↑` `CH-` (keyCode 428) | Recua na lista unificada |
-| `Enter` / OK | Confirma item em foco (carousel em fullscreen tem prioridade) |
-| `1`–`9` | Pula direto para o canal pelo número e inicia (sempre canais) |
 | `F` | Entra/sai do fullscreen |
-| `Esc` | Fecha o carousel fullscreen sem confirmar |
-
-**Navegação pelas setas — lista unificada em loop:**
-- A lista é `[...jogos, ...canais]`; o loop fecha do último canal de volta ao primeiro jogo
-- Se não há jogos, navega apenas entre canais
-- Em fullscreen: navegação atualiza somente o carousel — não toca nas listas da página
-
-**Carousel fullscreen:**
-- Faixa horizontal aparece na parte inferior da tela (acima dos controles) ao pressionar seta/CH em fullscreen
-- Cards de jogos (poster + título + canal) seguidos de cards de canais (logo + nome)
-- Item focado: borda amarela, opacidade 100%, levemente ampliado; demais ficam escurecidos
-- Some automaticamente após 4s sem teclar; `Esc` fecha imediatamente
-- `Enter` confirma o item focado no carousel e inicia o canal
-
-**Foco visual (fora de fullscreen):**
-- Foco (`--accent2` cinza) vs ativo (amarelo `--accent`) — aplicado a cards de jogos e botões de canais
-- HUD discreto no rodapé mostra `[N/Total] Título` ao navegar; some após 2s
-
-**Suporte a CH+/CH- de TVs:**
-- Detectado por `e.key === 'ChannelUp'` / `'ChannelDown'` ou `e.keyCode === 427` / `428`
-- Disponibilidade depende do browser/SO da TV — em browser nativo pode ser interceptado antes do JS
 
 ---
 
@@ -302,7 +295,7 @@ Thread `_expiry_watcher` roda a cada 10s e compara o count de IPs ativos. Se mud
 - **Lock por URL no scraper:** impede múltiplos browsers simultâneos para o mesmo canal. Timeout de 90s.
 - **Resolve assíncrono:** o frontend não bloqueia — dispara o resolve e faz polling, permitindo troca de canal enquanto resolve.
 - **Reescrita dos segmentos m3u8:** necessária para que o browser busque os `.ts` via proxy (evita CORS e headers de autenticação do servidor original).
-- **Cache 12h:** tokens e URLs de stream são caros de obter (scraping). TTL reduz carga e latência sem deixar streams mortos por tempo excessivo.
+- **Cache histórico sem limpeza:** além de servir hits (TTL 12h), o cache acumula todas as URLs de stream já obtidas por canal para rastreamento e eventual fallback futuro.
 - **IP TTL de 30s:** considera dispositivo ativo enquanto está consumindo o stream (HLS.js bate o servidor a cada ~2-6s).
 - **Rate limit sem dependência externa:** implementado com `deque` da stdlib, sem Flask-Limiter ou Redis.
 
@@ -310,10 +303,11 @@ Thread `_expiry_watcher` roda a cada 10s e compara o count de IPs ativos. Se mud
 
 ## TODO
 
+- [ ] **Ocultar canais já presentes nos jogos** — se um canal está listado em pelo menos um embed de jogo ativo, não exibi-lo na lista de canais avulsos. Ex: ESPN transmitindo Flamengo x São Paulo → ESPN some dos canais, o jogo já o representa
+- [ ] **Validação de cache antes de servir** — cache de 12h pode servir URL de stream morta. Fazer HEAD request na URL antes de retornar do cache
+- [ ] **Jogos sem canal disponível** — backend filtra e não exibe. Avaliar mostrar como cards cinza com tooltip "Sem canal disponível" para o usuário saber que o jogo existe mas não tem transmissão configurada
 - [ ] **`_RESOLVE_STATUS` cresce indefinidamente** — nunca é limpo. Adicionar TTL ou LRU com limite de entradas
 - [ ] **`/health` endpoint** — rota simples para monitoramento externo (uptime bots, load balancer). Retornar `{"ok": true}`
 - [ ] **Logs estruturados** — atualmente só stdout sem nível. Considerar `logging` com níveis INFO/WARNING/ERROR para filtrar em produção
 - [ ] **Métricas por canal** — contador de quantas vezes cada canal foi resolvido / falhou (útil para detectar canais problemáticos)
 - [ ] **Warmup paralelo** — atualmente resolve canais em série com delays 7–17s. Pool de 2–3 workers paralelos reduziria o tempo total mantendo os locks por URL já existentes
-- [ ] **Validação de cache antes de servir** — cache de 12h pode servir URL de stream morta. Fazer HEAD request na URL antes de retornar do cache
-- [ ] **Jogos sem canal disponível** — backend filtra e não exibe. Avaliar mostrar como cards cinza com tooltip "Sem canal disponível" para o usuário saber que o jogo existe mas não tem transmissão configurada

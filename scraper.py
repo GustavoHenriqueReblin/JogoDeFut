@@ -24,8 +24,8 @@ _UA = (
 _HEADERS = {"User-Agent": _UA, "Accept-Language": "pt-BR,pt;q=0.9"}
 _HEADLESS = os.environ.get("HEADLESS_DEBUG", "").lower() != "true"
 
-_CACHE: dict[str, tuple[float, dict]] = {}
-_CACHE_TTL = 43200  # 12 horas
+_CACHE: dict[str, list[tuple[float, dict]]] = {}
+_CACHE_TTL = 43200  # 12 horas — define entrada "ativa" para hit
 _LOCKS: dict[str, threading.Lock] = {}
 _LOCKS_META = threading.Lock()
 
@@ -37,13 +37,10 @@ def _load_cache():
     try:
         with open(_CACHE_FILE, "r", encoding="utf-8") as f:
             data = json.load(f)
-        now = time.time()
-        loaded = 0
-        for url, (ts, result) in data.items():
-            if now - ts < _CACHE_TTL:
-                _CACHE[url] = (ts, result)
-                loaded += 1
-        _log(f"[cache] {loaded} entradas carregadas do disco ({len(data) - loaded} expiradas ignoradas)")
+        total = sum(len(v) for v in data.values())
+        for url, entries in data.items():
+            _CACHE[url] = [(float(ts), result) for ts, result in entries]
+        _log(f"[cache] {total} entradas históricas carregadas ({len(data)} canais)")
     except FileNotFoundError:
         pass
     except Exception as e:
@@ -54,7 +51,8 @@ def _save_cache():
     try:
         with _CACHE_WRITE_LOCK:
             with open(_CACHE_FILE, "w", encoding="utf-8") as f:
-                json.dump({url: [ts, result] for url, (ts, result) in _CACHE.items()}, f)
+                json.dump({url: [[ts, result] for ts, result in entries]
+                           for url, entries in _CACHE.items()}, f)
     except Exception as e:
         _log(f"[cache] erro ao salvar cache no disco: {e}")
 
@@ -148,12 +146,23 @@ def _get_lock(key: str) -> threading.Lock:
         return _LOCKS[key]
 
 
+def _latest_valid(player_url: str) -> dict | None:
+    entries = _CACHE.get(player_url)
+    if not entries:
+        return None
+    now = time.time()
+    for ts, result in reversed(entries):
+        if now - ts < _CACHE_TTL:
+            return (ts, result)
+    return None
+
+
 def resolve_stream(player_url: str) -> dict:
-    cached = _CACHE.get(player_url)
-    if cached and (time.time() - cached[0]) < _CACHE_TTL:
-        age = int(time.time() - cached[0])
+    hit = _latest_valid(player_url)
+    if hit:
+        age = int(time.time() - hit[0])
         _log(f"[scraper] cache hit ({age}s atrás): {player_url}")
-        return cached[1]
+        return hit[1]
 
     lock = _get_lock(player_url)
     if not lock.acquire(blocking=True, timeout=90):
@@ -161,16 +170,16 @@ def resolve_stream(player_url: str) -> dict:
         return {"streams": []}
 
     try:
-        cached = _CACHE.get(player_url)
-        if cached and (time.time() - cached[0]) < _CACHE_TTL:
-            age = int(time.time() - cached[0])
+        hit = _latest_valid(player_url)
+        if hit:
+            age = int(time.time() - hit[0])
             _log(f"[scraper] cache hit pós-lock ({age}s atrás): {player_url}")
-            return cached[1]
+            return hit[1]
 
         result = _do_resolve(player_url)
         if result.get("streams"):
-            _CACHE[player_url] = (time.time(), result)
-            _log(f"[scraper] resultado salvo em cache por {_CACHE_TTL}s")
+            _CACHE.setdefault(player_url, []).append((time.time(), result))
+            _log(f"[scraper] novo resultado adicionado ao histórico (total: {len(_CACHE[player_url])})")
             threading.Thread(target=_save_cache, daemon=True).start()
         return result
     finally:
