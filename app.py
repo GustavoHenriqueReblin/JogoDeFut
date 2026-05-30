@@ -14,7 +14,8 @@ from flask_cors import CORS
 import requests as http_req
 
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
-from scraper import resolve_stream, _latest_valid, _evict_cache, _log
+import datetime
+from scraper import resolve_stream, _latest_valid, _evict_cache, _log, _CACHE_TTL
 
 import logging
 logging.getLogger('werkzeug').setLevel(logging.ERROR)
@@ -380,6 +381,59 @@ def status_stream():
                     headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
 
+# ── Cache status ──────────────────────────────────────────────────────────────
+
+@app.route("/cache-status")
+def cache_status():
+    if not _status_auth():
+        return jsonify({"error": "unauthorized"}), 401
+    now = time.time()
+    rows = []
+    for ch in _parse_channels():
+        entry = _latest_valid(ch["url"])
+        if entry:
+            expires_ts = entry[0] + _CACHE_TTL
+            expires_dt = datetime.datetime.fromtimestamp(expires_ts)
+            dias_semana = ["seg", "ter", "qua", "qui", "sex", "sáb", "dom"]
+            now_dt = datetime.datetime.now()
+            if expires_dt.date() == now_dt.date():
+                expires_str = f"hoje {expires_dt.strftime('%H:%M')}"
+            elif expires_dt.date() == (now_dt + datetime.timedelta(days=1)).date():
+                expires_str = f"amanhã {expires_dt.strftime('%H:%M')}"
+            else:
+                expires_str = f"{dias_semana[expires_dt.weekday()]} {expires_dt.strftime('%H:%M')}"
+            rows.append({"name": ch["name"], "status": "ok", "expires": expires_str})
+        else:
+            rows.append({"name": ch["name"], "status": "miss", "expires": None})
+
+    html_rows = "".join(
+        f'<tr>'
+        f'<td><img src="/static/logos/{r["name"]}.webp" onerror="this.style.display=\'none\'" '
+        f'style="height:22px;vertical-align:middle;margin-right:8px">{r["name"]}</td>'
+        f'<td><span class="badge {"ok" if r["status"]=="ok" else "miss"}">'
+        f'{"✓ expira " + r["expires"] if r["status"]=="ok" else "sem cache"}</span></td>'
+        f'</tr>'
+        for r in rows
+    )
+    ok = sum(1 for r in rows if r["status"] == "ok")
+    return f"""<!doctype html><html><head><meta charset="utf-8">
+<title>Cache Status</title>
+<style>
+  body{{font-family:monospace;background:#111;color:#eee;padding:24px}}
+  h2{{margin-bottom:16px}}
+  table{{border-collapse:collapse;width:100%;max-width:480px}}
+  td{{padding:8px 12px;border-bottom:1px solid #222}}
+  .badge{{padding:3px 10px;border-radius:12px;font-size:13px}}
+  .ok{{background:#1a3a1a;color:#4caf50}}
+  .miss{{background:#3a1a1a;color:#f44336}}
+  .summary{{margin-bottom:16px;color:#aaa}}
+</style></head><body>
+<h2>Cache dos Canais</h2>
+<p class="summary">{ok}/{len(rows)} com cache válido &nbsp;·&nbsp; TTL 12h</p>
+<table>{html_rows}</table>
+</body></html>""", 200, {"Content-Type": "text/html"}
+
+
 # ── Static ────────────────────────────────────────────────────────────────────
 
 _GIT_HASH = os.popen("git rev-parse --short HEAD").read().strip() or "0"
@@ -492,8 +546,10 @@ def _warmup_all_channels():
 
 
 def _midnight_restart():
+    import sys, time
     _log("[scheduler] reiniciando app (restart de 04h)...")
-    os._exit(0)  # hard-exit: systemd reinicia o processo; os.execv herdava o socket e conflitava com a porta
+    time.sleep(2)  # aguarda porta liberar antes do execv
+    os.execv(sys.executable, [sys.executable] + sys.argv)
 
 
 _WARMUP_ENABLED = os.environ.get("WARMUP_ENABLED", "false").lower() == "true"
@@ -517,9 +573,9 @@ def _start_scheduler():
     scheduler.add_job(_midnight_restart, CronTrigger(hour=4, minute=0, timezone=tz), id="restart_4h")
     scheduler.start()
 
-    if _WARMUP_ENABLED:
-        from scraper import _IS_DEV
-        if _IS_DEV:
+    from scraper import _IS_DEV
+    if _IS_DEV:
+        if _WARMUP_ENABLED:
             print("[scheduler] DEVELOPMENT: iniciando warmup imediato...")
             threading.Thread(target=_warmup_all_channels, daemon=True).start()
 

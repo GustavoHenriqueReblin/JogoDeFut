@@ -133,6 +133,7 @@ O scraping é necessário porque os players ficam atrás de Cloudflare Turnstile
 | GET | `/proxy/ts?url=` | Proxy de segmento .ts |
 | GET | `/status` | JSON com dispositivos ativos + IP + tempo conectado |
 | GET | `/status/stream` | SSE — emite count de ativos a cada mudança |
+| GET | `/cache-status` | Página HTML com status do cache por canal (verde = válido + idade, vermelho = sem cache) |
 | GET | `/manifest.json` | PWA manifest |
 | GET | `/sw.js` | Service Worker |
 | GET | `/favicon.ico` | Ícone |
@@ -151,11 +152,11 @@ Roda em background thread com timezone `America/Sao_Paulo`:
 
 | Horário | Job |
 |---|---|
-| 04h00 | Reinício via `os._exit(0)` — systemd reinicia o processo; porta é liberada antes da nova instância subir |
+| 04h00 | Reinício via `os.execv` — substitui o processo atual, mesmo terminal, logs contínuos. Aguarda 2s antes de executar para a porta ser liberada |
 | 07h00 | Warmup de todos os canais (se `WARMUP_ENABLED=true`) — cobre jogos europeus (08h–17h) |
 | 13h00 | Warmup de todos os canais (se `WARMUP_ENABLED=true`) — cobre jogos sul-americanos (16h–23h) |
 
-O warmup em dev (`ENVIRONMENT != PRODUCTION`) dispara imediatamente ao subir.
+O warmup em dev (`ENVIRONMENT != PRODUCTION`) dispara imediatamente ao subir. O app é iniciado diretamente com `python app.py` — sem systemd, o `os.execv` mantém o mesmo terminal.
 
 **Lógica de skip no warmup:** para cada canal, faz HEAD request (timeout 3s) na URL em cache. Se 2xx → pula. Se 4xx/erro ou sem cache → evicta e re-resolve. Garante que após restart com `cache.json` do dia anterior, URLs mortas são detectadas e substituídas.
 
@@ -242,6 +243,8 @@ O app é exposto via **Cloudflare Tunnel** (cloudflared) — sem IP público exp
 **Header `X-Accel-Buffering: no`** na resposta do `/proxy/ts` — impede o Cloudflare de acumular o segmento inteiro antes de repassar ao cliente (crítico para live streaming).
 
 **Cache busting de assets estáticos:** `player.html` recebe `?v=<git_hash>` em todos os imports de CSS/JS (`_GIT_HASH` calculado no import do `app.py`). A cada novo deploy o hash muda, forçando o navegador a buscar a versão nova.
+
+**`/cache-status`** (protegida por `STATUS_TOKEN`) — página HTML que lista todos os canais configurados com badge colorido: verde com horário de expiração em pt-BR (`✓ expira hoje 14:32`, `✓ expira amanhã 02:15`, `✓ expira qua 09:00`) ou vermelho "sem cache". Útil para confirmar que o warmup rodou corretamente.
 
 ---
 
