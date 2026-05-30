@@ -54,7 +54,9 @@ class PlayerCore {
   _bindRetry() {
     this.retryBtn.addEventListener('click', () => {
       if (this._lastChannel) {
+        console.log('[retry] clicado — canal:', this._lastChannel.name, 'url:', this._lastChannel.url);
         this.activeUrl = null;
+        this._currentUrl = null;
         this.selectChannel(this._lastChannel.name, this._lastChannel.url, this._lastChannel.meta);
       }
     });
@@ -89,7 +91,13 @@ class PlayerCore {
       this.hls.attachMedia(this.videoEl);
       this.hls.on(Hls.Events.MANIFEST_PARSED, onReady);
       this.hls.on(Hls.Events.ERROR, (_, data) => {
-        if (data.fatal) this.showOverlay('Falha ao reproduzir.', false, true);
+        console.warn('[hls] error', data.type, data.details, 'fatal:', data.fatal, data);
+        if (data.fatal) {
+          console.error('[hls] FATAL — destruindo instância e mostrando retry');
+          this.hls.destroy();
+          this.hls = null;
+          this.showOverlay('Falha ao reproduzir.', false, true);
+        }
       });
     } else if (this.videoEl.canPlayType('application/vnd.apple.mpegurl')) {
       this.player.source = { type: 'video', sources: [{ src: streamUrl, type: 'application/x-mpegURL' }] };
@@ -126,8 +134,11 @@ class PlayerCore {
     this.showOverlay('Buscando stream…', true);
 
     let initial;
-    try { initial = await fetch('/resolve?url=' + url).then(r => r.json()); } catch {}
+    try { initial = await fetch('/resolve?url=' + url).then(r => r.json()); } catch (e) {
+      console.warn('[resolve] fetch inicial falhou:', e);
+    }
     if (this._currentUrl !== url) return;
+    console.log('[resolve] resposta inicial:', initial?.status, name);
     if (initial?.status === 'ready') { this.playStream(url, channelMeta); return; }
     if (initial?.status === 'error') { this.showOverlay('Stream não disponível no momento.', false, true); return; }
 

@@ -278,7 +278,12 @@ def stream():
             mimetype="application/vnd.apple.mpegurl",
             headers={"Access-Control-Allow-Origin": "*", "Cache-Control": "no-cache"},
         )
+    except requests.HTTPError as e:
+        _log(f"[stream] URL morta para {channel_url} (HTTP {r.status_code}), evictando cache")
+        _evict_cache(channel_url)
+        return str(e), 502
     except Exception as e:
+        _log(f"[stream] erro transitório para {channel_url}: {e}")
         return str(e), 502
 
 
@@ -351,6 +356,58 @@ def status():
             for ip, (fs, ls) in _ACTIVE_IPS.items()
             if now - ls < _IP_TTL
         ]
+
+    if request.headers.get("Accept", "").startswith("text/html"):
+        token_qs = f"?token={request.args.get('token', '')}" if request.args.get('token') else ""
+        return f"""<!doctype html><html><head><meta charset="utf-8">
+<title>Status</title>
+<style>
+  body{{font-family:monospace;background:#111;color:#eee;padding:24px;margin:0}}
+  h2{{margin-bottom:4px}}
+  .sub{{color:#666;font-size:13px;margin-bottom:24px}}
+  .counter{{font-size:48px;font-weight:bold;color:#4caf50;margin-bottom:8px;line-height:1}}
+  .counter.zero{{color:#555}}
+  .label{{font-size:13px;color:#aaa;margin-bottom:24px}}
+  table{{border-collapse:collapse;width:100%;max-width:420px}}
+  td{{padding:9px 12px;border-bottom:1px solid #1e1e1e;font-size:14px}}
+  .ip{{color:#eee}}
+  .dur{{color:#aaa;text-align:right}}
+  .empty{{color:#555;text-align:center;padding:20px}}
+  .dot{{display:inline-block;width:8px;height:8px;border-radius:50%;
+        background:#4caf50;margin-right:6px;animation:pulse 2s infinite}}
+  @keyframes pulse{{0%,100%{{opacity:1}}50%{{opacity:.3}}}}
+</style></head><body>
+<h2>Dispositivos Ativos</h2>
+<div class="counter zero" id="counter">—</div>
+<div class="label" id="label"></div>
+<table>
+  <thead><tr><td><b>IP</b></td><td style="text-align:right"><b>conectado há</b></td></tr></thead>
+  <tbody id="tbody"><tr><td colspan="2" class="empty">Carregando…</td></tr></tbody>
+</table>
+<script>
+  const TOKEN = '{request.args.get("token", "")}';
+  const qs = TOKEN ? '?token=' + TOKEN : '';
+
+  async function refresh() {{
+    const r = await fetch('/status' + qs);
+    if (!r.ok) return;
+    const d = await r.json();
+    const n = d.devices;
+    document.getElementById('counter').textContent = n;
+    document.getElementById('counter').className = 'counter' + (n === 0 ? ' zero' : '');
+    const dot = n > 0 ? '<span class="dot"></span>' : '';
+    const s = n !== 1 ? 's' : '';
+    document.getElementById('label').innerHTML = dot + 'dispositivo' + s + ' ativo' + s;
+    document.getElementById('tbody').innerHTML = d.clients.length
+      ? d.clients.map(c => `<tr><td class="ip">${{c.ip}}</td><td class="dur">${{c.connected_for}}</td></tr>`).join('')
+      : '<tr><td colspan="2" class="empty">Nenhum dispositivo ativo</td></tr>';
+  }}
+
+  refresh();
+  setInterval(refresh, 5000);
+</script>
+</body></html>""", 200, {"Content-Type": "text/html"}
+
     return jsonify({"devices": len(active), "clients": active})
 
 

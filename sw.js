@@ -1,4 +1,4 @@
-const CACHE_NAME = "hls-player-v2";
+const CACHE_NAME = "hls-player-v3";
 const APP_ASSETS = [
   "/",
   "/manifest.json",
@@ -29,9 +29,14 @@ self.addEventListener("activate", (event) => {
   self.clients.claim();
 });
 
+const CACHEABLE = ["/", "/manifest.json", "/favicon.ico", "/static/"];
+
 self.addEventListener("fetch", (event) => {
   const url = new URL(event.request.url);
   if (event.request.method !== "GET" || url.origin !== self.location.origin) {
+    return;
+  }
+  if (!CACHEABLE.some((p) => url.pathname === p || url.pathname.startsWith(p))) {
     return;
   }
 

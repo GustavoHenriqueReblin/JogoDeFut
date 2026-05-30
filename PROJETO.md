@@ -55,7 +55,7 @@ app.py (Flask)
 | `CHANNELS` | Sim | Lista `Nome:URL,Nome:URL` dos canais. URL é a página do player do canal no site cloudflaire. |
 | `CLOUDFLAIRE_PLAYERS` | Sim | Mapeamento `host:fonte` — relaciona o domínio do player à fonte usada na API. Ex: `player.exemplo.com:globo` |
 | `GAMES_API_URL` | Sim | URL da API externa que retorna os jogos ao vivo em JSON |
-| `PROXY_SECRET` | Não | Chave hex para encriptar URLs (gerada automaticamente se ausente) |
+| `PROXY_SECRET` | **Sim** | Chave hex 64 chars para encriptar URLs. **Deve estar fixada no `.env`** — se ausente, uma chave aleatória é gerada a cada restart, invalidando todas as URLs encriptadas em sessões abertas (erro 400). Gerar com `python -c "import secrets; print(secrets.token_hex(32))"` |
 | `PORT` | Não | Porta do servidor (padrão: 5000) |
 | `ENVIRONMENT` | Não | `PRODUCTION` desliga logs de debug. Qualquer outro valor (padrão `DEVELOPMENT`) habilita logs. |
 | `WARMUP_ENABLED` | Não | `true` habilita warmup automático dos canais às 07h e 13h |
@@ -107,16 +107,9 @@ O scraping é necessário porque os players ficam atrás de Cloudflare Turnstile
 - Log impresso quando novo IP conecta: `[dd/mm HH:MM:SS] Novo IP (x.x.x.x) conectado. Total ativos: (N).`
 - SSE em `/status/stream` notifica em tempo real o número de dispositivos ativos
 
-**GET /status** retorna:
-```json
-{
-  "devices": 2,
-  "clients": [
-    {"ip": "177.x.x.x", "connected_for": "1h 23m"},
-    {"ip": "189.x.x.x", "connected_for": "4m 12s"}
-  ]
-}
-```
+**GET /status** — JSON (chamada de API) ou página HTML (browser):
+- JSON: `{"devices": 2, "clients": [{"ip": "177.x.x.x", "connected_for": "1h 23m"}, ...]}`
+- HTML: página monospace dark com contador de dispositivos, dot pulsante e tabela IP/tempo. Atualiza a cada 5s via `setInterval` + fetch no próprio `/status`.
 
 `connected_for` usa formato legível: `Xs`, `Xm Ys`, `Xh Ym`
 
@@ -133,7 +126,7 @@ O scraping é necessário porque os players ficam atrás de Cloudflare Turnstile
 | GET | `/resolve/status?url=` | Retorna `loading \| ready \| error \| unknown` |
 | GET | `/stream?url=` | m3u8 com segmentos proxiados |
 | GET | `/proxy/ts?url=` | Proxy de segmento .ts |
-| GET | `/status` | JSON com dispositivos ativos + IP + tempo conectado |
+| GET | `/status` | Dispositivos ativos — JSON (Accept padrão) ou página HTML com polling 5s (Accept: text/html) |
 | GET | `/status/stream` | SSE — emite count de ativos a cada mudança |
 | GET | `/cache-status` | Página HTML com status do cache por canal (verde = válido + idade, vermelho = sem cache) |
 | GET | `/manifest.json` | PWA manifest |
@@ -144,7 +137,7 @@ O scraping é necessário porque os players ficam atrás de Cloudflare Turnstile
 
 ## Segurança
 
-URLs de canais e segmentos são **encriptadas com AES-256-GCM** (biblioteca `cryptography`) antes de ir ao cliente. A chave é `PROXY_SECRET` (hex 32 chars = 128 bits). Sem essa chave, o cliente não consegue derivar as URLs originais.
+URLs de canais e segmentos são **encriptadas com AES-256-GCM** (biblioteca `cryptography`) antes de ir ao cliente. A chave é `PROXY_SECRET` (hex 64 chars = 256 bits). Sem essa chave fixada no `.env`, cada restart gera uma nova chave e sessões abertas recebem 400 ao tentar usar URLs antigas.
 
 ---
 
