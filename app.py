@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 import os, urllib.parse, base64, secrets, time, threading, queue
 from collections import deque
-from datetime import datetime
+from datetime import datetime, timedelta
 
 try:
     from dotenv import load_dotenv
@@ -14,7 +14,6 @@ from flask_cors import CORS
 import requests as http_req
 
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
-import datetime
 from scraper import resolve_stream, _latest_valid, _evict_cache, _log, _CACHE_TTL
 
 import logging
@@ -393,12 +392,12 @@ def cache_status():
         entry = _latest_valid(ch["url"])
         if entry:
             expires_ts = entry[0] + _CACHE_TTL
-            expires_dt = datetime.datetime.fromtimestamp(expires_ts)
+            expires_dt = datetime.fromtimestamp(expires_ts)
             dias_semana = ["seg", "ter", "qua", "qui", "sex", "sáb", "dom"]
-            now_dt = datetime.datetime.now()
+            now_dt = datetime.now()
             if expires_dt.date() == now_dt.date():
                 expires_str = f"hoje {expires_dt.strftime('%H:%M')}"
-            elif expires_dt.date() == (now_dt + datetime.timedelta(days=1)).date():
+            elif expires_dt.date() == (now_dt + timedelta(days=1)).date():
                 expires_str = f"amanhã {expires_dt.strftime('%H:%M')}"
             else:
                 expires_str = f"{dias_semana[expires_dt.weekday()]} {expires_dt.strftime('%H:%M')}"
@@ -440,7 +439,9 @@ _GIT_HASH = os.popen("git rev-parse --short HEAD").read().strip() or "0"
 
 @app.route("/")
 def index():
-    return render_template("player.html", v=_GIT_HASH)
+    return render_template("player.html", v=_GIT_HASH,
+        hls_buffer=int(os.environ.get("HLS_BUFFER_LENGTH", 30)),
+        hls_buffer_max=int(os.environ.get("HLS_MAX_BUFFER_LENGTH", 60)))
 
 @app.route("/manifest.json")
 def manifest():

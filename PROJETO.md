@@ -61,6 +61,8 @@ app.py (Flask)
 | `WARMUP_ENABLED` | Não | `true` habilita warmup automático dos canais às 07h e 13h |
 | `HEADLESS_DEBUG` | Não | `true` abre o browser visível durante scraping (útil para debug local) |
 | `STATUS_TOKEN` | Não | Token de acesso às rotas `/status` e `/status/stream`. Se vazio, rotas ficam abertas. Passar via `?token=X` ou header `Authorization: Bearer X` |
+| `HLS_BUFFER_LENGTH` | Não | Segundos de buffer que o HLS.js tenta manter à frente (padrão: 30). Com 60, quedas de CDN de até ~60s não travam. |
+| `HLS_MAX_BUFFER_LENGTH` | Não | Teto absoluto do buffer HLS.js (padrão: 60). Com 120, banda sobrando pode acumular até 2min. Acima disso não há ganho prático para live. |
 
 ---
 

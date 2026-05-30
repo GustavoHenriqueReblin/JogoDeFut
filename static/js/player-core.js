@@ -84,7 +84,7 @@ class PlayerCore {
     };
 
     if (Hls.isSupported()) {
-      this.hls = new Hls({ enableWorker: false });
+      this.hls = new Hls({ enableWorker: false, ...window._HLS_CFG });
       this.hls.loadSource(streamUrl);
       this.hls.attachMedia(this.videoEl);
       this.hls.on(Hls.Events.MANIFEST_PARSED, onReady);
