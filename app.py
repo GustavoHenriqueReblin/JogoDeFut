@@ -382,9 +382,11 @@ def status_stream():
 
 # ── Static ────────────────────────────────────────────────────────────────────
 
+_GIT_HASH = os.popen("git rev-parse --short HEAD").read().strip() or "0"
+
 @app.route("/")
 def index():
-    return render_template("player.html")
+    return render_template("player.html", v=_GIT_HASH)
 
 @app.route("/manifest.json")
 def manifest():
