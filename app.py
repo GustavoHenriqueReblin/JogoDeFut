@@ -278,7 +278,7 @@ def stream():
             mimetype="application/vnd.apple.mpegurl",
             headers={"Access-Control-Allow-Origin": "*", "Cache-Control": "no-cache"},
         )
-    except requests.HTTPError as e:
+    except http_req.HTTPError as e:
         _log(f"[stream] URL morta para {channel_url} (HTTP {r.status_code}), evictando cache")
         _evict_cache(channel_url)
         return str(e), 502
