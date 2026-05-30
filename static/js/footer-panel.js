@@ -202,8 +202,8 @@ class FooterPanel {
       const dy = _ty0 - e.changedTouches[0].clientY;
       _touchHandled = true;
 
-      if (!this._open && Math.abs(dx) > Math.abs(dy) && Math.abs(dx) > 50) {
-        // swipe horizontal com painel fechado: troca canal
+      if (!this.el.classList.contains('visible') && Math.abs(dx) > Math.abs(dy) && Math.abs(dx) > 50) {
+        // swipe horizontal com footer oculto: troca canal
         this._navigateChannel(dx > 0 ? 1 : -1);
       } else if (dy > 50 && !this._open) {
         this.open();
