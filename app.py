@@ -305,7 +305,7 @@ def proxy_ts():
         return Response(
             generate(),
             mimetype="video/mp2t",
-            headers={"Access-Control-Allow-Origin": "*", "Cache-Control": "max-age=30"},
+            headers={"Access-Control-Allow-Origin": "*", "Cache-Control": "max-age=30", "X-Accel-Buffering": "no"},
         )
     except Exception as e:
         return str(e), 502

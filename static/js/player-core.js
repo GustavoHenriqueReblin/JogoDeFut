@@ -125,10 +125,17 @@ class PlayerCore {
     this.player.muted = true;
     this.showOverlay('Buscando stream…', true);
 
-    try { await fetch('/resolve?url=' + url); } catch {}
+    let initial;
+    try { initial = await fetch('/resolve?url=' + url).then(r => r.json()); } catch {}
+    if (this._currentUrl !== url) return;
+    if (initial?.status === 'ready') { this.playStream(url, channelMeta); return; }
+    if (initial?.status === 'error') { this.showOverlay('Stream não disponível no momento.', false, true); return; }
 
     const MAX_WAIT = 120;
-    for (let elapsed = 0; elapsed <= MAX_WAIT; elapsed += 2) {
+    for (let elapsed = 2; elapsed <= MAX_WAIT; elapsed += 2) {
+      if (this._currentUrl !== url) return;
+      this.overlayMsg.textContent = `Buscando stream… ${elapsed}s`;
+      await new Promise(r => setTimeout(r, 2000));
       if (this._currentUrl !== url) return;
 
       let resp;
@@ -136,11 +143,6 @@ class PlayerCore {
 
       if (resp?.status === 'ready') { this.playStream(url, channelMeta); return; }
       if (resp?.status === 'error') { this.showOverlay('Stream não disponível no momento.', false, true); return; }
-
-      if (elapsed < MAX_WAIT) {
-        if (elapsed > 0) this.overlayMsg.textContent = `Buscando stream… ${elapsed}s`;
-        await new Promise(r => setTimeout(r, 2000));
-      }
     }
 
     if (this._currentUrl === url) this.showOverlay('Timeout: stream não disponível.', false, true);

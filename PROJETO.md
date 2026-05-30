@@ -39,6 +39,7 @@ app.py (Flask)
 | `static/js/player-core.js` | Classe `PlayerCore` — Plyr, HLS.js, selectChannel, overlay |
 | `static/js/footer-panel.js` | Classe `FooterPanel` — painel deslizante de jogos e canais |
 | `static/js/app.js` | Init — instancia PlayerCore + FooterPanel, carrega dados da API |
+| `stream_log.txt` | Histórico de streams resolvidos (appendado a cada resolve, no `.gitignore`) |
 | `manifest.json` | PWA manifest |
 | `sw.js` | Service Worker — cache offline dos assets estáticos |
 | `requirements.txt` | Dependências Python |
@@ -184,7 +185,7 @@ O warmup em dev (`ENVIRONMENT != PRODUCTION`) dispara imediatamente ao subir.
 - **Controles**: mute + volume slider (esquerda, `width:110px`) | info do jogo/canal (centro, `flex:1`) | fullscreen (direita, `width:110px`) — larguras iguais garantem centro matematicamente centralizado
 - **Toggle "CANAIS E JOGOS"**: strip com degradê lateral (transparent→escuro→transparent). Quando aberto, fundo sólido aparece via `::before opacity` (assimétrico: 0.5s abrir, 2s fechar). Sem fundo quando painel fechado
 - **Abertura/fechamento do painel**: clique no toggle | swipe up/down (touch)
-- **Troca de canal por swipe**: swipe left/right no vídeo (touch) — navega pela lista ordenada (jogos → canais livres) em loop. Detectado quando `|dx| > |dy|` e `|dx| > 50px`, evitando conflito com swipe vertical
+- **Troca de canal por swipe**: swipe left/right no vídeo (touch) — navega pela lista ordenada (jogos → canais livres) em loop. Detectado quando `|dx| > |dy|` e `|dx| > 50px`. Bloqueado quando o painel está aberto (`_open`) para não conflitar com rolagem do carrossel
 - **Visibilidade dos controles**: aparece no carregamento (aberto), mousemove mostra por 2s, clique no vídeo faz toggle show/hide. No mobile, tap detectado no `touchend` com flag `_touchHandled` (o `click` é interceptado pelo Plyr quando `pointer-events:none`)
 - **Conteúdo**: skeleton loading (4 game cards + 8 channel cards com shimmer) até dados carregarem; depois jogos, separador, canais livres (canais já presentes em algum jogo são ocultados)
 - Abre automaticamente na carga da página (`open()` no constructor)
@@ -192,7 +193,7 @@ O warmup em dev (`ENVIRONMENT != PRODUCTION`) dispara imediatamente ao subir.
 **Troca de canal — sequência exata:**
 1. `selectChannel(name, url, meta)` muta o player imediatamente (`player.muted = true`)
 2. Exibe overlay de loading (spinner + "Buscando stream…")
-3. Chama `/resolve` e faz polling em `/resolve/status` — primeiro check é imediato (sem espera), o que torna a troca quase instantânea quando há cache hit
+3. Chama `/resolve` e **usa a resposta diretamente** — se `status=ready`, chama `playStream` sem round trip extra. Só entra no polling de 2s quando `status=loading`
 4. Quando pronto: `playStream(url, meta)` é chamado
 5. No evento `MANIFEST_PARSED` do HLS.js: desmuta (`player.muted = false`), esconde overlay, entra em fullscreen, exibe info bar, força controles visíveis por 9s
 
@@ -225,6 +226,22 @@ O warmup em dev (`ENVIRONMENT != PRODUCTION`) dispara imediatamente ao subir.
 **Logos disponíveis:** Band Sports, ESPN, ESPN 2, ESPN 4, Globo, Paramount+, Premiere, Premiere 2, Premiere 3, Prime Video, SBT, SporTV, SporTV 2, TNT, RecordTV, Disney+
 
 **Scraping (scraper.py)** — TTL do cache: 12h (`_CACHE_TTL = 43200`). Ver seção [Cache persistente](#cache-persistente).
+
+---
+
+## Infraestrutura (Cloudflare Tunnel)
+
+O app é exposto via **Cloudflare Tunnel** (cloudflared) — sem IP público exposto, sem porta aberta.
+
+**Configurações ativas no dashboard:**
+- HTTP/2, HTTP/3 (QUIC), TLS 1.3, 0-RTT — todos habilitados
+- Sempre usar HTTPS — habilitado
+- WebSockets — habilitado (necessário para SSE em `/status/stream`)
+- **Cache Rule "TS Files":** `/proxy/ts*` → qualificado para cache, Edge TTL 30s — segmentos `.ts` são servidos do edge Cloudflare sem bater no servidor quando já cacheados
+
+**Header `X-Accel-Buffering: no`** na resposta do `/proxy/ts` — impede o Cloudflare de acumular o segmento inteiro antes de repassar ao cliente (crítico para live streaming).
+
+**Cache busting de assets estáticos:** `player.html` recebe `?v=<git_hash>` em todos os imports de CSS/JS (`_GIT_HASH` calculado no import do `app.py`). A cada novo deploy o hash muda, forçando o navegador a buscar a versão nova.
 
 ---
 
