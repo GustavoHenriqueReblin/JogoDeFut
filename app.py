@@ -296,8 +296,11 @@ def proxy_ts():
         r.raise_for_status()
 
         def generate():
-            for chunk in r.iter_content(chunk_size=65536):
-                yield chunk
+            try:
+                for chunk in r.iter_content(chunk_size=65536):
+                    yield chunk
+            except Exception:
+                return
 
         return Response(
             generate(),
