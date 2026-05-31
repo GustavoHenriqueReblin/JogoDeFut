@@ -93,10 +93,39 @@ class PlayerCore {
       this.hls.on(Hls.Events.ERROR, (_, data) => {
         console.warn('[hls] error', data.type, data.details, 'fatal:', data.fatal, data);
         if (data.fatal) {
-          console.error('[hls] FATAL — destruindo instância e mostrando retry');
-          this.hls.destroy();
-          this.hls = null;
-          this.showOverlay('Falha ao reproduzir.', false, true);
+          // só mostra erro ao usuário quando o buffer estiver vazio
+          // se ainda tem conteúdo, o player continua reproduzindo — erro silencioso
+          const buffered = this.videoEl.buffered;
+          const currentTime = this.videoEl.currentTime;
+          let bufferAhead = 0;
+          for (let i = 0; i < buffered.length; i++) {
+            if (buffered.start(i) <= currentTime && currentTime <= buffered.end(i)) {
+              bufferAhead = buffered.end(i) - currentTime;
+              break;
+            }
+          }
+          if (bufferAhead > 2) {
+            console.warn(`[hls] FATAL mas buffer ainda tem ${bufferAhead.toFixed(1)}s — aguardando drenar antes de exibir erro`);
+            this.hls.destroy();
+            this.hls = null;
+            const checkInterval = setInterval(() => {
+              const buf = this.videoEl.buffered;
+              const ct = this.videoEl.currentTime;
+              let ahead = 0;
+              for (let i = 0; i < buf.length; i++) {
+                if (buf.start(i) <= ct && ct <= buf.end(i)) { ahead = buf.end(i) - ct; break; }
+              }
+              if (ahead <= 0.5 || this.videoEl.paused) {
+                clearInterval(checkInterval);
+                if (this._currentUrl === url) this.showOverlay('Falha ao reproduzir.', false, true);
+              }
+            }, 1000);
+          } else {
+            console.error('[hls] FATAL sem buffer — mostrando erro imediatamente');
+            this.hls.destroy();
+            this.hls = null;
+            this.showOverlay('Falha ao reproduzir.', false, true);
+          }
         }
       });
     } else if (this.videoEl.canPlayType('application/vnd.apple.mpegurl')) {
@@ -142,7 +171,7 @@ class PlayerCore {
     if (initial?.status === 'ready') { this.playStream(url, channelMeta); return; }
     if (initial?.status === 'error') { this.showOverlay('Stream não disponível no momento.', false, true); return; }
 
-    const MAX_WAIT = 120;
+    const MAX_WAIT = 30;
     for (let elapsed = 2; elapsed <= MAX_WAIT; elapsed += 2) {
       if (this._currentUrl !== url) return;
       this.overlayMsg.textContent = `Buscando stream… ${elapsed}s`;

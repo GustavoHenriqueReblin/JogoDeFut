@@ -58,7 +58,9 @@ app.py (Flask)
 | `PROXY_SECRET` | **Sim** | Chave hex 64 chars para encriptar URLs. **Deve estar fixada no `.env`** — se ausente, uma chave aleatória é gerada a cada restart, invalidando todas as URLs encriptadas em sessões abertas (erro 400). Gerar com `python -c "import secrets; print(secrets.token_hex(32))"` |
 | `PORT` | Não | Porta do servidor (padrão: 5000) |
 | `ENVIRONMENT` | Não | `PRODUCTION` desliga logs de debug. Qualquer outro valor (padrão `DEVELOPMENT`) habilita logs. |
-| `WARMUP_ENABLED` | Não | `true` habilita warmup automático dos canais às 07h e 13h |
+| `WARMUP_ENABLED` | Não | `true` habilita warmup automático dos canais às 05h, 12h e 18h |
+| `WARMUP_WORKERS` | Não | Número de canais resolvidos em paralelo no warmup (padrão: 2) |
+| `MIN_POOL_SIZE` | Não | Tamanho mínimo do pool de URLs por canal antes de invocar Chromium (padrão: 5) |
 | `HEADLESS_DEBUG` | Não | `true` abre o browser visível durante scraping (útil para debug local) |
 | `STATUS_TOKEN` | Não | Token de acesso às rotas `/status` e `/status/stream`. Se vazio, rotas ficam abertas. Passar via `?token=X` ou header `Authorization: Bearer X` |
 | `HLS_BUFFER_LENGTH` | Não | Segundos de buffer que o HLS.js tenta manter à frente (padrão: 30). Com 60, quedas de CDN de até ~60s não travam. |
@@ -71,7 +73,7 @@ app.py (Flask)
 1. Usuário clica em um canal (ou jogo)
 2. Player é **mutado imediatamente** — o stream anterior continua em buffer mas sem áudio enquanto o novo carrega
 3. Frontend chama `GET /resolve?url=<enc>` — dispara resolve em background thread
-4. Frontend faz polling em `GET /resolve/status?url=<enc>` a cada 2s (timeout: 120s)
+4. Frontend faz polling em `GET /resolve/status?url=<enc>` a cada 2s (timeout: 30s)
 5. Quando status = `ready`, chama `playStream()` que aponta HLS.js para `GET /stream?url=<enc>`
 6. `/stream` chama `resolve_stream()` (que usa o cache), busca o m3u8, reescreve os segmentos para `/proxy/ts?url=<enc_seg>` e devolve o m3u8 modificado
 7. HLS.js busca segmentos via `/proxy/ts` que faz proxy transparente
@@ -84,7 +86,7 @@ app.py (Flask)
 O scraping é necessário porque os players ficam atrás de Cloudflare Turnstile.
 
 **Fluxo:**
-1. `resolve_stream(player_url)` — verifica cache (TTL 12h), adquire lock por URL para evitar scraping paralelo do mesmo canal
+1. `resolve_stream(player_url)` — verifica pool (TTL 48h). Pool completo → retorna imediatamente. Pool parcial → retorna o que tem e dispara acumulação em background (não bloqueia). Pool vazio → bloqueia até resolver. Só invoca Chromium se `pool_size < MIN_POOL_SIZE`
 2. `_do_resolve()` — extrai `host` e `channel` da URL, consulta `CLOUDFLAIRE_PLAYERS` para saber a `fonte`
 3. Chama `_scrape_token()` até 8 vezes com delays progressivos `[3,5,8,10,12,15,20]`s após 404
 4. `_scrape_token()` abre Chromium via Playwright (patchright), navega até a URL e captura o token Turnstile por 3 métodos:
@@ -92,7 +94,7 @@ O scraping é necessário porque os players ficam atrás de Cloudflare Turnstile
    - Interceptação de response body (JSON com `"token"`)
    - Polling de DOM (`[name="cf-turnstile-response"]`)
 5. Com o token, faz `POST` na API externa (`/get_token`) com `{fonte, channel, token}`
-6. Retorna `{"streams": [{"url": "<hls_url>", "referer": player_url}]}`
+6. Retorna `{"url": "<hls_url>", "referer": player_url}` — entry adicionada ao pool do canal
 
 **Proteção contra bloqueio de IP no warmup:** após 3 falhas consecutivas, aguarda 5 minutos antes de continuar.
 
@@ -147,13 +149,26 @@ Roda em background thread com timezone `America/Sao_Paulo`:
 
 | Horário | Job |
 |---|---|
-| 04h00 | Reinício via `os.execv` — substitui o processo atual, mesmo terminal, logs contínuos. Aguarda 2s antes de executar para a porta ser liberada |
-| 07h00 | Warmup de todos os canais (se `WARMUP_ENABLED=true`) — cobre jogos europeus (08h–17h) |
-| 13h00 | Warmup de todos os canais (se `WARMUP_ENABLED=true`) — cobre jogos sul-americanos (16h–23h) |
+| 04h00 | Reinício via `os.execv` — substitui o processo em-place (mesmo PID, mesmo terminal). Aguarda 2s antes de executar para a porta ser liberada. |
+| 05h00 | Warmup de todos os canais (se `WARMUP_ENABLED=true`) — pool vazio da madrugada |
+| 12h00 | Warmup de todos os canais (se `WARMUP_ENABLED=true`) — cobre jogos europeus (13h–17h) |
+| 18h00 | Warmup de todos os canais (se `WARMUP_ENABLED=true`) — cobre jogos sul-americanos (19h–23h) |
 
 O warmup em dev (`ENVIRONMENT != PRODUCTION`) dispara imediatamente ao subir. O app é iniciado diretamente com `python app.py` — sem systemd, o `os.execv` mantém o mesmo terminal.
 
-**Lógica de skip no warmup:** para cada canal, faz HEAD request (timeout 3s) na URL em cache. Se 2xx → pula. Se 4xx/erro ou sem cache → evicta e re-resolve. Garante que após restart com `cache.json` do dia anterior, URLs mortas são detectadas e substituídas.
+**`is_stream_alive(url)`** — função central de validação em `scraper.py`. Chamada em dois momentos:
+1. **Inserção no pool** (`_accumulate_bg`) — URL resolvida pelo Chromium é validada antes de persistir. Se falhar, descartada sem entrar no `cache.json`.
+2. **Warmup** — valida entradas existentes; remove mortas via `_evict_url`.
+
+Critérios de validação:
+1. GET na URL → `status_code < 400` + body começa com `#EXTM3U`
+2. Ausência de `#EXT-X-ENDLIST` (stream live nunca termina)
+3. HEAD no PNG de P2P (`cdn.nossoplayer.site/{hash}.png`) embutido no M3U8 — se 404, stream sem P2P, player bloqueia; erro de rede não descarta (evita falso positivo por latência)
+4. Canais sem linha de PNG (ex: Globo com CDN direto) passam sem a verificação P2P
+
+**Lógica de skip no warmup:** após validar e remover mortas, se `pool_size >= MIN_POOL_SIZE` → pula. Se parcial (ou vazio) → resolve via Chromium para acumular mais uma URL.
+
+**Prevenção de loop:** sem validação na inserção, o scraper poderia resolver uma URL inválida (ex: Paramount+ sem P2P), adicioná-la ao cache, o warmup removê-la, e o ciclo se repetir indefinidamente. A validação na inserção quebra o loop — URL ruim nunca persiste.
 
 ---
 
@@ -219,9 +234,15 @@ O warmup em dev (`ENVIRONMENT != PRODUCTION`) dispara imediatamente ao subir. O 
 
 **Mock de jogos:** removido. `/games` retornando vazio ou falhando resulta em lista vazia — nenhum fallback.
 
+**Tratamento de erro HLS.js — buffer-aware:**
+Quando o HLS.js reporta um erro `fatal` (desistiu de tentar), o comportamento depende do buffer disponível:
+- **Buffer > 2s:** instância HLS é destruída (para requests), mas o erro é suprimido. Um `setInterval` de 1s monitora o buffer restante. Só exibe overlay de erro quando restar ≤ 0.5s — o usuário assiste até o buffer esgotar sem interrupção.
+- **Buffer ≤ 2s ou vazio:** mostra o erro imediatamente.
+- Guard `_currentUrl === url` evita exibir overlay se o usuário trocou de canal enquanto o buffer drenava.
+
 **Logos disponíveis:** Band Sports, ESPN, ESPN 2, ESPN 4, Globo, Paramount+, Premiere, Premiere 2, Premiere 3, Prime Video, SBT, SporTV, SporTV 2, TNT, RecordTV, Disney+
 
-**Scraping (scraper.py)** — TTL do cache: 12h (`_CACHE_TTL = 43200`). Ver seção [Cache persistente](#cache-persistente).
+**Scraping (scraper.py)** — TTL do pool: 48h (`_CACHE_TTL = 172800`). Ver seção [Cache persistente](#cache-persistente).
 
 ---
 
@@ -274,19 +295,20 @@ apscheduler, pytz
 
 O `_CACHE` do `scraper.py` é salvo em `cache.json` na raiz do projeto.
 
-- **Estrutura em memória:** `dict[str, tuple[float, dict]]` — uma entrada por canal (mais recente)
-- **Sobrescreve** a entrada anterior a cada novo resolve bem-sucedido
-- **Carregado no import** do módulo
-- **Salvo em background thread** após cada resolve (não bloqueia a resposta)
-- **Cache hit:** `_latest_valid()` retorna a entrada se dentro do TTL (12h), `None` caso contrário
-- **`_save_cache`** só persiste entradas ainda válidas (dentro do TTL) — `cache.json` nunca acumula entradas expiradas
-- **Formato JSON:** `{ "player_url": [timestamp, result_dict] }`
-- **TTL:** 12h (`_CACHE_TTL = 43200`)
-- Reiniciar o app não perde o cache — streams já resolvidos ficam disponíveis imediatamente
+- **Estrutura em memória:** `dict[str, list[tuple[float, dict]]]` — pool de entradas por canal, acumula, não substitui
+- **Cada entry:** `(timestamp, {"url": "...", "referer": "..."})` — uma URL por entry
+- **Carregado no import** do módulo (migra formato antigo automaticamente)
+- **Salvo em background thread** após cada resolve (não bloqueia a resposta), com `indent=2` para legibilidade
+- **`_valid_pool()`** filtra entradas dentro do TTL; **`_latest_valid()`** retorna a mais recente
+- **`_save_cache`** só persiste entradas ainda válidas — `cache.json` nunca acumula entradas expiradas
+- **`_evict_url(url)`** remove só a URL morta; **`_evict_cache()`** limpa o pool todo
+- **Formato JSON:** `{ "player_url": [[timestamp, entry], ...] }`
+- **TTL:** 48h (`_CACHE_TTL = 172800`) — tokens confirmados ativos >24h, 48h como margem de segurança
+- Reiniciar o app não perde o cache — pool completo disponível imediatamente
 
 **Histórico de streams (`stream_log.txt`):** a cada novo resolve bem-sucedido, uma linha é appendada na raiz do projeto:
 ```
-[2026-05-29 14:32:10] https://.../tv/espn | https://cdn.cloudflaire.lat/.../style.css | referer: https://.../tv/espn
+[YYYY-MM-DD HH:MM:SS] <player_url> | <stream_url> | referer: <player_url>
 ```
 
 > `cache.json` e `stream_log.txt` devem estar no `.gitignore` (contêm URLs internas dos streams).
@@ -318,7 +340,7 @@ Thread `_expiry_watcher` roda a cada 10s e compara o count de IPs ativos. Se mud
 - **Lock por URL no scraper:** impede múltiplos browsers simultâneos para o mesmo canal. Timeout de 90s.
 - **Resolve assíncrono:** o frontend não bloqueia — dispara o resolve e faz polling, permitindo troca de canal enquanto resolve.
 - **Reescrita dos segmentos m3u8:** necessária para que o browser busque os `.ts` via proxy (evita CORS e headers de autenticação do servidor original).
-- **Cache por canal (entrada única):** uma entrada por canal, sobrescrita a cada novo resolve. `cache.json` só persiste entradas válidas. Histórico completo em `stream_log.txt`.
+- **Pool por canal:** múltiplas URLs por canal acumuladas ao longo do tempo. `_evict_url` remove só a morta; `_evict_cache` limpa tudo quando todas falham. Histórico completo em `stream_log.txt`.
 - **IP TTL de 30s:** considera dispositivo ativo enquanto está consumindo o stream (HLS.js bate o servidor a cada ~2-6s).
 - **Rate limit sem dependência externa:** implementado com `deque` da stdlib, sem Flask-Limiter ou Redis.
 
@@ -332,3 +354,64 @@ Thread `_expiry_watcher` roda a cada 10s e compara o count de IPs ativos. Se mud
 - [ ] **`/health` endpoint** — rota simples para monitoramento externo (uptime bots, load balancer). Retornar `{"ok": true}`
 - [ ] **Logs estruturados** — atualmente só stdout sem nível. Considerar `logging` com níveis INFO/WARNING/ERROR para filtrar em produção
 - [ ] **Métricas por canal** — contador de quantas vezes cada canal foi resolvido / falhou (útil para detectar canais problemáticos)
+
+---
+
+## Backend multi-CDN — Pool de URLs
+
+> **Implementado em 30/05/2026.** Pool de URLs por canal acumulando múltiplos CDN hosts. Chromium ainda é necessário para obter a hash do canal, mas roda cada vez menos conforme o pool cresce.
+
+### Infraestrutura descoberta
+
+```
+api.<domínio>/get_token
+  └→ retorna { token: "<hash_canal>", url: "https://<cdn-host>/assets/themes/<player>_<hash_canal>/style.css" }
+
+m3u8 (disfarçado de .css) contém segmentos:
+  https://cdn.<domínio-segmentos>/<hash>.png   ← domínio fixo, entrega P2P
+
+  Se esse PNG retorna 404 → P2P indisponível → player bloqueia o stream mesmo com #EXTM3U válido.
+  Canais sem P2P (ex: Globo RJ) podem ter CDN direto e não referenciarem esse PNG — ausência da linha é ok.
+```
+
+#### CDN host — totalmente previsível
+
+O host CDN segue o padrão `MD5(str(n).zfill(4)) + ".<domínio>"` onde `n` é sequencial (0000–9999).
+
+**Descoberta crítica:** todos os hosts 0000–9999 estão ativos simultaneamente — são aliases para o mesmo backend. A "rotação" é só qual deles a API retorna em cada chamada. Se o backend cair, todos caem juntos.
+
+**Consequência:** qualquer `MD5(0–9999)` funciona como host. Não há necessidade de rastrear qual está "ativo". O identificador real de um stream é o `hash_canal` (`nossoplayer_{hash}`), não a URL completa — por isso o dedup do pool é feito por hash, não por URL.
+
+#### Hash do canal — ainda requer Chromium (uma vez)
+
+O hash de canal **não** segue o padrão MD5 sequencial — é opaco, retornado pela API. Pode ou não mudar ao longo do tempo (TTL confirmado >24h, observar `stream_log.txt` para determinar limite real).
+
+Os hashes conhecidos ficam em `cache.json` e `stream_log.txt`.
+
+### Descobertas adicionais (30/05/2026)
+
+- **Wildcard DNS confirmado:** qualquer subdomínio serve o stream. O subdomínio é irrelevante — só a hash do canal importa.
+- **Múltiplos tokens válidos simultaneamente:** a API emite um token novo a cada chamada sem invalidar os anteriores — funciona como um pool crescente de tickets. Base da estratégia de multi-URL.
+- **TTL real do token: >24h confirmado** — `_CACHE_TTL` ajustado para 172800s (48h). Observar `stream_log.txt` por mais dias para determinar limite real.
+
+### Arquitetura implementada (30/05/2026)
+
+**Problema resolvido:** evict prematuro — HLS timeout fazia o código descartar a URL e rodar Chromium, mas a URL estava viva. CDN hosts antigos e novos servem o stream simultaneamente por horas.
+
+**Solução — pool de URLs por canal (`scraper.py`):**
+- `_CACHE[player_url]` = `[(ts, stream_entry), ...]` — acumula, não substitui
+- `resolve_stream`: pool completo → serve; parcial → serve + acumula em background; vazio → bloqueia. Só invoca Chromium se `pool_size < MIN_POOL_SIZE` (configurável via `.env`, padrão 5)
+- **Dedup por `hash_canal`** — o CDN host é irrelevante (todos os hosts 0000–9999 são aliases do mesmo backend). `6252cf.../nossoplayer_abc` e `2b77fb.../nossoplayer_abc` são o mesmo hash; só hashes genuinamente novos acumulam no pool
+- `_evict_url` remove apenas a URL morta do pool
+- `_evict_cache` limpa o pool todo (só quando todas as URLs falham)
+- Warmup valida todas as URLs do pool via `is_stream_alive()`; remove mortas; só pula o canal se ainda `>= MIN_POOL_SIZE` vivas
+
+**Failover em `/stream` (`app.py`):**
+- Itera o pool em ordem; URL morta (4xx) → `_evict_url`, tenta próxima
+- Só faz evict total quando todas as URLs do pool falham
+- Chromium roda cada vez menos conforme o pool cresce
+
+### TTL confirmado
+
+- **>24h confirmado:** token de 29/05 20:38 ainda ativo em 30/05 20:41 (~24h03min)
+- **`_CACHE_TTL` atual:** 172800s (48h) — subido em 30/05/2026 após confirmação >24h. Continuar observando `stream_log.txt` para determinar se pode subir mais

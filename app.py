@@ -14,7 +14,11 @@ from flask_cors import CORS
 import requests as http_req
 
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
-from scraper import resolve_stream, _latest_valid, _evict_cache, _log, _CACHE_TTL
+from scraper import (
+    resolve_stream, _latest_valid, _evict_cache, _evict_url,
+    get_stream_pool, pool_size, _log, _CACHE_TTL, _MIN_POOL_SIZE,
+    is_stream_alive,
+)
 
 import logging
 logging.getLogger('werkzeug').setLevel(logging.ERROR)
@@ -250,41 +254,45 @@ def stream():
     except Exception as e:
         return str(e), 502
 
-    if not result.get("streams"):
+    streams = result.get("streams", [])
+    if not streams:
         return "stream não encontrado", 404
 
-    m3u8_url = result["streams"][0]["url"]
-    referer  = result["streams"][0].get("referer", "")
+    for stream_entry in streams:
+        m3u8_url = stream_entry["url"]
+        referer  = stream_entry.get("referer", "")
 
-    headers = dict(_PROXY_HEADERS)
-    if referer:
-        headers["Referer"] = referer
-        headers["Origin"]  = referer.rstrip("/").rsplit("/", 1)[0]
+        headers = dict(_PROXY_HEADERS)
+        if referer:
+            headers["Referer"] = referer
+            headers["Origin"]  = referer.rstrip("/").rsplit("/", 1)[0]
 
-    try:
-        r = http_req.get(m3u8_url, headers=headers, timeout=10)
-        r.raise_for_status()
+        try:
+            r = http_req.get(m3u8_url, headers=headers, timeout=10)
+            r.raise_for_status()
 
-        lines = []
-        for line in r.text.splitlines():
-            stripped = line.strip()
-            if stripped and not stripped.startswith("#"):
-                seg = stripped if stripped.startswith("http") else urllib.parse.urljoin(m3u8_url, stripped)
-                line = "/proxy/ts?url=" + _encrypt_url(seg)
-            lines.append(line)
+            lines = []
+            for line in r.text.splitlines():
+                stripped = line.strip()
+                if stripped and not stripped.startswith("#"):
+                    seg = stripped if stripped.startswith("http") else urllib.parse.urljoin(m3u8_url, stripped)
+                    line = "/proxy/ts?url=" + _encrypt_url(seg)
+                lines.append(line)
 
-        return Response(
-            "\n".join(lines),
-            mimetype="application/vnd.apple.mpegurl",
-            headers={"Access-Control-Allow-Origin": "*", "Cache-Control": "no-cache"},
-        )
-    except http_req.HTTPError as e:
-        _log(f"[stream] URL morta para {channel_url} (HTTP {r.status_code}), evictando cache")
-        _evict_cache(channel_url)
-        return str(e), 502
-    except Exception as e:
-        _log(f"[stream] erro transitório para {channel_url}: {e}")
-        return str(e), 502
+            return Response(
+                "\n".join(lines),
+                mimetype="application/vnd.apple.mpegurl",
+                headers={"Access-Control-Allow-Origin": "*", "Cache-Control": "no-cache"},
+            )
+        except http_req.HTTPError:
+            _log(f"[stream] URL morta ({r.status_code}), removendo do pool: {m3u8_url}")
+            _evict_url(channel_url, m3u8_url)
+        except Exception as e:
+            _log(f"[stream] erro transitório em {m3u8_url}: {e}")
+
+    _log(f"[stream] todas as URLs do pool falharam para {channel_url}, evictando cache")
+    _evict_cache(channel_url)
+    return "stream indisponível", 502
 
 
 @app.route("/proxy/ts")
@@ -445,29 +453,38 @@ def cache_status():
         return jsonify({"error": "unauthorized"}), 401
     now = time.time()
     rows = []
+    dias_semana = ["seg", "ter", "qua", "qui", "sex", "sáb", "dom"]
+    now_dt = datetime.now()
     for ch in _parse_channels():
         entry = _latest_valid(ch["url"])
+        sz = pool_size(ch["url"])
         if entry:
             expires_ts = entry[0] + _CACHE_TTL
             expires_dt = datetime.fromtimestamp(expires_ts)
-            dias_semana = ["seg", "ter", "qua", "qui", "sex", "sáb", "dom"]
-            now_dt = datetime.now()
             if expires_dt.date() == now_dt.date():
                 expires_str = f"hoje {expires_dt.strftime('%H:%M')}"
             elif expires_dt.date() == (now_dt + timedelta(days=1)).date():
                 expires_str = f"amanhã {expires_dt.strftime('%H:%M')}"
             else:
                 expires_str = f"{dias_semana[expires_dt.weekday()]} {expires_dt.strftime('%H:%M')}"
-            rows.append({"name": ch["name"], "status": "ok", "expires": expires_str})
+            rows.append({"name": ch["name"], "status": "ok", "expires": expires_str, "pool": sz})
         else:
-            rows.append({"name": ch["name"], "status": "miss", "expires": None})
+            rows.append({"name": ch["name"], "status": "miss", "expires": None, "pool": 0})
+
+    def _badge_class(r):
+        if r["status"] != "ok": return "miss"
+        if r["pool"] >= 3: return "ok"
+        return "warn"
+
+    def _badge_text(r):
+        if r["status"] != "ok": return "sem cache"
+        return f'✓ {r["pool"]} URL{"s" if r["pool"] != 1 else ""} · expira {r["expires"]}'
 
     html_rows = "".join(
         f'<tr>'
         f'<td><img src="/static/logos/{r["name"]}.webp" onerror="this.style.display=\'none\'" '
         f'style="height:22px;vertical-align:middle;margin-right:8px">{r["name"]}</td>'
-        f'<td><span class="badge {"ok" if r["status"]=="ok" else "miss"}">'
-        f'{"✓ expira " + r["expires"] if r["status"]=="ok" else "sem cache"}</span></td>'
+        f'<td><span class="badge {_badge_class(r)}">{_badge_text(r)}</span></td>'
         f'</tr>'
         for r in rows
     )
@@ -481,11 +498,12 @@ def cache_status():
   td{{padding:8px 12px;border-bottom:1px solid #222}}
   .badge{{padding:3px 10px;border-radius:12px;font-size:13px}}
   .ok{{background:#1a3a1a;color:#4caf50}}
+  .warn{{background:#3a2e00;color:#ffc107}}
   .miss{{background:#3a1a1a;color:#f44336}}
   .summary{{margin-bottom:16px;color:#aaa}}
 </style></head><body>
 <h2>Cache dos Canais</h2>
-<p class="summary">{ok}/{len(rows)} com cache válido &nbsp;·&nbsp; TTL 12h</p>
+<p class="summary">{ok}/{len(rows)} com cache válido &nbsp;·&nbsp; TTL 48h &nbsp;·&nbsp; pool mín. {_MIN_POOL_SIZE} URLs</p>
 <table>{html_rows}</table>
 </body></html>""", 200, {"Content-Type": "text/html"}
 
@@ -515,7 +533,7 @@ def favicon():
 
 _WARMUP_COOLDOWN = 300        # pausa de 5 min se parecer bloqueio de IP
 _WARMUP_CONSECUTIVE_FAIL = 3  # quantas falhas seguidas disparam o cooldown
-_WARMUP_WORKERS = 1           # serial por padrão — paralelo aumenta suspeita no mesmo IP
+_WARMUP_WORKERS = int(os.environ.get("WARMUP_WORKERS", 2))
 
 
 def _warmup_pass(channels: list, label: str) -> list:
@@ -536,24 +554,26 @@ def _warmup_pass(channels: list, label: str) -> list:
         tid = threading.current_thread().ident
         time.sleep(random.uniform(7, 17))
 
-        hit = _latest_valid(ch["url"])
-        if hit:
-            stream_url = (hit[1].get("streams") or [{}])[0].get("url", "")
-            alive = False
-            if stream_url:
-                try:
-                    r = http_req.head(stream_url, timeout=3, allow_redirects=True)
-                    alive = r.status_code < 400
-                except Exception:
-                    pass
-            if alive:
-                _log(f"[warmup] {label} [{i}/{total}] '{ch['name']}': URL viva, pulando")
+        pool = get_stream_pool(ch["url"])
+        if pool:
+            dead = []
+            for entry in pool:
+                s_url = entry.get("url", "")
+                if not s_url:
+                    continue
+                if not is_stream_alive(s_url):
+                    dead.append(s_url)
+            for s_url in dead:
+                _log(f"[warmup] {label} [{i}/{total}] '{ch['name']}': URL morta, removendo do pool")
+                _evict_url(ch["url"], s_url)
+            alive_count = pool_size(ch["url"])
+            if alive_count >= _MIN_POOL_SIZE:
+                _log(f"[warmup] {label} [{i}/{total}] '{ch['name']}': pool completo ({alive_count} URLs), pulando")
                 with wfc_lock:
                     wfc[tid] = 0
                 return None
-            age_h = (time.time() - hit[0]) / 3600
-            _log(f"[warmup] {label} [{i}/{total}] '{ch['name']}': URL morta (cache {age_h:.1f}h), re-resolvendo...")
-            _evict_cache(ch["url"])
+            if alive_count > 0:
+                _log(f"[warmup] {label} [{i}/{total}] '{ch['name']}': pool parcial ({alive_count}/{_MIN_POOL_SIZE}), acumulando...")
 
         _log(f"[warmup] {label} [{i}/{total}] resolvendo '{ch['name']}'...")
         ok = False
@@ -606,7 +626,7 @@ def _warmup_all_channels():
 def _midnight_restart():
     import sys, time
     _log("[scheduler] reiniciando app (restart de 04h)...")
-    time.sleep(2)  # aguarda porta liberar antes do execv
+    time.sleep(2)
     os.execv(sys.executable, [sys.executable] + sys.argv)
 
 
@@ -622,9 +642,10 @@ def _start_scheduler():
     scheduler = BackgroundScheduler(timezone=tz)
 
     if _WARMUP_ENABLED:
-        scheduler.add_job(_warmup_all_channels, CronTrigger(hour=7,  minute=0, timezone=tz), id="warmup_7h")
-        scheduler.add_job(_warmup_all_channels, CronTrigger(hour=13, minute=0, timezone=tz), id="warmup_13h")
-        _log("[scheduler] agendamentos ativos: warmup 07h, 13h | restart 04h (America/Sao_Paulo)")
+        scheduler.add_job(_warmup_all_channels, CronTrigger(hour=5,  minute=0, timezone=tz), id="warmup_5h")
+        scheduler.add_job(_warmup_all_channels, CronTrigger(hour=12, minute=0, timezone=tz), id="warmup_12h")
+        scheduler.add_job(_warmup_all_channels, CronTrigger(hour=18, minute=0, timezone=tz), id="warmup_18h")
+        _log("[scheduler] agendamentos ativos: warmup 05h, 12h, 18h | restart 04h (America/Sao_Paulo)")
     else:
         _log("[scheduler] warmup desativado (WARMUP_ENABLED=false) | restart 04h (America/Sao_Paulo)")
 
