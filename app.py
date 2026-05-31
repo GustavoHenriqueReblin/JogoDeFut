@@ -258,9 +258,12 @@ def stream():
     if not streams:
         return "stream não encontrado", 404
 
-    for stream_entry in streams:
+    total = len(streams)
+    for idx, stream_entry in enumerate(streams, 1):
         m3u8_url = stream_entry["url"]
         referer  = stream_entry.get("referer", "")
+        from scraper import _channel_hash
+        label = _channel_hash(m3u8_url) or m3u8_url
 
         headers = dict(_PROXY_HEADERS)
         if referer:
@@ -279,18 +282,23 @@ def stream():
                     line = "/proxy/ts?url=" + _encrypt_url(seg)
                 lines.append(line)
 
+            if idx > 1:
+                _log(f"[stream] ok [{idx}/{total}] hash={label}")
             return Response(
                 "\n".join(lines),
                 mimetype="application/vnd.apple.mpegurl",
                 headers={"Access-Control-Allow-Origin": "*", "Cache-Control": "no-cache"},
             )
         except http_req.HTTPError:
-            _log(f"[stream] URL morta ({r.status_code}), removendo do pool: {m3u8_url}")
+            _log(f"[stream] morta [{idx}/{total}] {r.status_code} hash={label}, evict → próxima")
             _evict_url(channel_url, m3u8_url)
+            continue
         except Exception as e:
-            _log(f"[stream] erro transitório em {m3u8_url}: {e}")
+            _log(f"[stream] timeout/erro [{idx}/{total}] hash={label}: {e} → próxima")
+            _evict_url(channel_url, m3u8_url)
+            continue
 
-    _log(f"[stream] todas as URLs do pool falharam para {channel_url}, evictando cache")
+    _log(f"[stream] todas as {total} URLs falharam para {channel_url}, evictando cache")
     _evict_cache(channel_url)
     return "stream indisponível", 502
 

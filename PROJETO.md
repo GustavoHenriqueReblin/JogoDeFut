@@ -407,8 +407,8 @@ Os hashes conhecidos ficam em `cache.json` e `stream_log.txt`.
 - Warmup valida todas as URLs do pool via `is_stream_alive()`; remove mortas; só pula o canal se ainda `>= MIN_POOL_SIZE` vivas
 
 **Failover em `/stream` (`app.py`):**
-- Itera o pool em ordem; URL morta (4xx) → `_evict_url`, tenta próxima
-- Só faz evict total quando todas as URLs do pool falham
+- Itera o pool em ordem; URL morta (4xx **ou timeout/exceção**) → `_evict_url` + `continue`, tenta próxima
+- Só faz evict total (`_evict_cache`) quando todas as URLs do pool falham
 - Chromium roda cada vez menos conforme o pool cresce
 
 ### TTL confirmado
