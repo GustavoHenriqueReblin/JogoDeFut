@@ -883,10 +883,14 @@ def _warmup_all_channels():
 
 
 def _midnight_restart():
-    import sys, time
+    import sys, subprocess
     _log("[scheduler] reiniciando app (restart de 04h)...")
-    time.sleep(2)
-    os.execv(sys.executable, [sys.executable] + sys.argv)
+    # Novo processo aguarda 3s (tempo do OS liberar a porta) antes de subir
+    cmd = f"fuser -k 5000/tcp 2>/dev/null; sleep 2 && exec {sys.executable} {' '.join(sys.argv)}"
+    env = os.environ.copy()
+    env["SIMULATE_RESTART"] = "false"  # evita loop infinito após restart
+    subprocess.Popen(cmd, shell=True, start_new_session=True, env=env)
+    os._exit(0)
 
 
 _WARMUP_ENABLED = os.environ.get("WARMUP_ENABLED", "false").lower() == "true"
