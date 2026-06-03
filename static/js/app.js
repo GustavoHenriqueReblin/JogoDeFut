@@ -12,7 +12,7 @@ if ('serviceWorker' in navigator) {
     onSelect:  (name, url, meta) => core.selectChannel(name, url, meta),
   });
 
-  core.onChannelSelect = url  => footer.setActiveUrl(url);
+  core.onChannelSelect = slug => footer.setActiveSlug(slug);
   core.onInfoUpdate    = meta => footer.setInfo(meta);
   core.onInfoClear     = ()   => footer.clearInfo();
 

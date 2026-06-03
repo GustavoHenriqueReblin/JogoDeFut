@@ -99,17 +99,28 @@ _load_cache()
 
 # ── Stream validation ─────────────────────────────────────────────────────────
 
-def is_stream_alive(stream_url: str) -> bool:
-    """Valida se uma URL de stream HLS está viva e com P2P disponível."""
+def check_stream(stream_url: str) -> str:
+    """
+    Testa se uma URL de stream HLS está disponível.
+
+    Retorna:
+        'alive'     — M3U8 válido, live, P2P ok
+        'dead'      — 404, stream encerrado ou P2P indisponível (erro permanente)
+        'transient' — 5xx, timeout ou falha de rede (erro temporário)
+    """
     try:
-        r = _http.get(stream_url, timeout=5, allow_redirects=True)
+        r = _http.get(stream_url, timeout=10, allow_redirects=True)
+        if r.status_code == 404:
+            return "dead"
+        if r.status_code >= 500:
+            return "transient"   # CDN sobrecarregado — não confirma morte
         if r.status_code >= 400:
-            return False
+            return "dead"        # outro 4xx (403, 410…) = permanente
         body = r.text
         if not body.lstrip().startswith("#EXTM3U"):
-            return False
+            return "dead"
         if "#EXT-X-ENDLIST" in body:
-            return False
+            return "dead"        # stream encerrado
         p2p_png = next(
             (l.strip() for l in body.splitlines()
              if "cdn.nossoplayer.site" in l and l.strip().endswith(".png")),
@@ -119,12 +130,35 @@ def is_stream_alive(stream_url: str) -> bool:
             try:
                 pr = _http.head(p2p_png, timeout=5, allow_redirects=True)
                 if pr.status_code == 404:
-                    return False
+                    return "dead"
             except Exception:
-                pass  # erro de rede → assume P2P ok
-        return True
+                pass  # erro de rede no check P2P → assume ok (evita falso positivo)
+        return "alive"
     except Exception:
-        return False
+        return "transient"       # timeout, conexão recusada, DNS etc.
+
+
+def is_stream_alive(stream_url: str) -> bool:
+    """True se o stream está vivo. Usado na inserção — conservador: transiente = não adiciona."""
+    return check_stream(stream_url) == "alive"
+
+
+def is_stream_definitely_dead(stream_url: str, attempts: int = 3, delay: float = 5.0) -> bool:
+    """
+    True apenas se a URL estiver DEFINITIVAMENTE morta.
+    Erros transientes (5xx/timeout) não contam como morte — só 'dead' confirma.
+    Retorna False se qualquer tentativa retornar 'alive' ou se todas forem 'transient'.
+    """
+    for i in range(attempts):
+        status = check_stream(stream_url)
+        if status == "alive":
+            return False
+        if status == "dead":
+            return True          # 404/encerrado: não precisa de 3 tentativas
+        # 'transient': espera e tenta de novo
+        if i < attempts - 1:
+            time.sleep(delay)
+    return False  # todas as tentativas foram transientes → não é definitivamente morto
 
 
 # ── Pool helpers ──────────────────────────────────────────────────────────────
@@ -132,7 +166,7 @@ def is_stream_alive(stream_url: str) -> bool:
 def _valid_pool(player_url: str) -> list[tuple[float, dict]]:
     """Retorna todas as entradas não expiradas do pool."""
     now = time.time()
-    return [(ts, e) for ts, e in _CACHE.get(player_url, []) if now - ts < _CACHE_TTL]
+    return [(ts, e) for ts, e in _CACHE.get(player_url, []) if 0 <= now - ts < _CACHE_TTL]
 
 
 def _latest_valid(player_url: str) -> tuple[float, dict] | None:

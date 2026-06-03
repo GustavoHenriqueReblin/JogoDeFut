@@ -6,7 +6,7 @@ class FooterPanel {
     this._open      = false;
     this._games     = [];
     this._channels  = [];
-    this._activeUrl = null;
+    this._activeSlug = null;
     this._hideTimer = null;
 
     this._mount();
@@ -265,10 +265,10 @@ class FooterPanel {
     this._renderCards();
   }
 
-  setActiveUrl(url) {
-    this._activeUrl = url;
+  setActiveSlug(slug) {
+    this._activeSlug = slug;
     this.el.querySelectorAll('.footer-card').forEach(c => {
-      c.classList.toggle('active', c.dataset.url === url);
+      c.classList.toggle('active', c.dataset.slug === slug);
     });
   }
 
@@ -276,8 +276,8 @@ class FooterPanel {
     this.scrollEl.innerHTML = '';
     this._games.forEach(g => this._appendGameCard(g));
 
-    const usedUrls = new Set(this._games.map(g => g.embeds[0].channel_url));
-    const freeChannels = this._channels.filter(ch => !usedUrls.has(ch.url));
+    const usedSlugs = new Set(this._games.map(g => g.embeds[0].channel_slug));
+    const freeChannels = this._channels.filter(ch => !usedSlugs.has(ch.slug));
 
     if (this._games.length && freeChannels.length) {
       const sep = document.createElement('div');
@@ -298,9 +298,9 @@ class FooterPanel {
       title: game.title, desc: game.description || '', time: timeStr,
     };
     const card = document.createElement('div');
-    card.className   = 'footer-card footer-game-card';
-    card.dataset.url = embed.channel_url;
-    card.innerHTML   = `
+    card.className    = 'footer-card footer-game-card';
+    card.dataset.slug = embed.channel_slug;
+    card.innerHTML    = `
       <img class="footer-game-poster" src="${game.poster}" alt="" loading="lazy"
            onerror="this.style.display='none'">
       <div class="footer-game-info">
@@ -314,7 +314,7 @@ class FooterPanel {
         </div>
       </div>`;
     card.addEventListener('click', () => {
-      this.onSelect(embed.channel_name, embed.channel_url, meta);
+      this.onSelect(embed.channel_name, embed.channel_slug, meta);
       this.close();
     });
     this.scrollEl.appendChild(card);
@@ -322,36 +322,36 @@ class FooterPanel {
 
   _appendChannelCard(ch) {
     const card = document.createElement('div');
-    card.className   = 'footer-card footer-ch-card';
-    card.dataset.url = ch.url;
-    card.innerHTML   = `
+    card.className    = 'footer-card footer-ch-card';
+    card.dataset.slug = ch.slug;
+    card.innerHTML    = `
       <img class="footer-ch-logo" src="/static/logos/${ch.name}.webp" alt="${ch.name}"
            onerror="this.style.display='none'">
       <span class="footer-ch-name">${ch.name}</span>`;
     card.addEventListener('click', () => {
-      this.onSelect(ch.name, ch.url);
+      this.onSelect(ch.name, ch.slug);
       this.close();
     });
     this.scrollEl.appendChild(card);
   }
 
   _navigateChannel(dir) {
-    const usedUrls = new Set(this._games.map(g => g.embeds[0].channel_url));
+    const usedSlugs = new Set(this._games.map(g => g.embeds[0].channel_slug));
     const items = [
       ...this._games.map(g => ({
         name: g.embeds[0].channel_name,
-        url:  g.embeds[0].channel_url,
+        slug: g.embeds[0].channel_slug,
         meta: { type: 'game', channelName: g.embeds[0].channel_name,
                 title: g.title, desc: g.description || '', time: g.start_time.slice(11, 16) },
       })),
       ...this._channels
-        .filter(ch => !usedUrls.has(ch.url))
-        .map(ch => ({ name: ch.name, url: ch.url, meta: null })),
+        .filter(ch => !usedSlugs.has(ch.slug))
+        .map(ch => ({ name: ch.name, slug: ch.slug, meta: null })),
     ];
     if (!items.length) return;
-    const idx = items.findIndex(it => it.url === this._activeUrl);
+    const idx = items.findIndex(it => it.slug === this._activeSlug);
     const next = items[(idx + dir + items.length) % items.length];
-    this.onSelect(next.name, next.url, next.meta);
+    this.onSelect(next.name, next.slug, next.meta);
   }
 
   /* ── State ───────────────────────────────────────────────── */

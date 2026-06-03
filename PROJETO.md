@@ -13,14 +13,17 @@ App web PWA para assistir futebol ao vivo. Funciona como um intermediário: busc
 ```
 browser
   └── player.html (Plyr + HLS.js)
-        ├── GET /channels        → lista de canais configurados
-        ├── GET /games           → jogos ao vivo (API externa)
-        ├── GET /resolve?url=    → dispara resolve assíncrono
-        ├── GET /resolve/status  → polling do status do resolve
-        ├── GET /stream?url=     → m3u8 proxiado (segmentos reescritos)
-        └── GET /proxy/ts?url=   → proxy dos segmentos .ts
+        ├── GET /channels           → lista de canais configurados (name + slug)
+        ├── GET /games              → jogos ao vivo (API externa)
+        ├── GET /resolve/<slug>     → dispara resolve assíncrono + inicia relay
+        ├── GET /resolve/status/<slug> → polling do status do resolve
+        ├── GET /<slug>             → m3u8 pré-cacheado pelo relay (resposta instantânea)
+        ├── WS  /ws/<slug>          → sincronismo: relay faz broadcast do segmento canônico
+        └── GET /proxy/ts?url=      → proxy dos segmentos .ts (URL do segmento encriptada)
 
 app.py (Flask)
+  ├── StreamRelay (um por canal ativo)
+  │     └── loop background: busca M3U8 do CDN a cada 2s, cacheia pronto
   └── scraper.py (Playwright/patchright)
         └── API externa  → retorna a URL do stream HLS
 ```
@@ -40,6 +43,7 @@ app.py (Flask)
 | `static/js/footer-panel.js` | Classe `FooterPanel` — painel deslizante de jogos e canais |
 | `static/js/app.js` | Init — instancia PlayerCore + FooterPanel, carrega dados da API |
 | `stream_log.txt` | Histórico de streams resolvidos (appendado a cada resolve, no `.gitignore`) |
+| `check_cache.py` | Script utilitário: testa URLs do `stream_log.txt` e insere as válidas no `cache.json` |
 | `manifest.json` | PWA manifest |
 | `sw.js` | Service Worker — cache offline dos assets estáticos |
 | `requirements.txt` | Dependências Python |
@@ -63,8 +67,8 @@ app.py (Flask)
 | `MIN_POOL_SIZE` | Não | Tamanho mínimo do pool de URLs por canal antes de invocar Chromium (padrão: 5) |
 | `HEADLESS_DEBUG` | Não | `true` abre o browser visível durante scraping (útil para debug local) |
 | `STATUS_TOKEN` | Não | Token de acesso às rotas `/status` e `/status/stream`. Se vazio, rotas ficam abertas. Passar via `?token=X` ou header `Authorization: Bearer X` |
-| `HLS_BUFFER_LENGTH` | Não | Segundos de buffer que o HLS.js tenta manter à frente (padrão: 30). Com 60, quedas de CDN de até ~60s não travam. |
-| `HLS_MAX_BUFFER_LENGTH` | Não | Teto absoluto do buffer HLS.js (padrão: 60). Com 120, banda sobrando pode acumular até 2min. Acima disso não há ganho prático para live. |
+| `HLS_BUFFER_LENGTH` | Não | Segundos de buffer que o HLS.js tenta manter à frente (padrão: 20). Controla quanto buffer acumula; valor alto reduz risco de stall em quedas de CDN. |
+| `HLS_MAX_BUFFER_LENGTH` | Não | Teto absoluto do buffer HLS.js (padrão: 30). Limita acúmulo máximo de buffer em RAM. |
 
 ---
 
@@ -72,12 +76,16 @@ app.py (Flask)
 
 1. Usuário clica em um canal (ou jogo)
 2. Player é **mutado imediatamente** — o stream anterior continua em buffer mas sem áudio enquanto o novo carrega
-3. Frontend chama `GET /resolve?url=<enc>` — dispara resolve em background thread
-4. Frontend faz polling em `GET /resolve/status?url=<enc>` a cada 2s (timeout: 30s)
-5. Quando status = `ready`, chama `playStream()` que aponta HLS.js para `GET /stream?url=<enc>`
-6. `/stream` chama `resolve_stream()` (que usa o cache), busca o m3u8, reescreve os segmentos para `/proxy/ts?url=<enc_seg>` e devolve o m3u8 modificado
-7. HLS.js busca segmentos via `/proxy/ts` que faz proxy transparente
-8. Quando `MANIFEST_PARSED` dispara: **desmuta**, esconde overlay, entra em fullscreen, exibe info bar
+3. Frontend chama `GET /resolve/<slug>`:
+   - Pool ok → retorna `ready` imediatamente **e já inicia o `StreamRelay`** para pré-buscar o M3U8
+   - Pool vazio → retorna `loading`, scraping roda em background; quando pronto **inicia o relay**
+4. Frontend faz polling em `GET /resolve/status/<slug>` a cada 2s (timeout: 30s)
+5. Quando status = `ready`, chama `playStream()` que aponta HLS.js para `GET /stream/<slug>`
+6. `/stream/<slug>` consulta o `StreamRelay` do canal — se já tiver M3U8 cacheado devolve instantaneamente; se relay ainda estiver na 1ª busca, aguarda até 5s
+7. O M3U8 devolvido já tem segmentos reescritos para `/proxy/ts?url=<enc_seg>` — feito pelo relay
+8. HLS.js re-busca `/stream` a cada ~2-6s para novos segmentos; relay já tem o próximo M3U8 pronto
+9. HLS.js busca segmentos via `/proxy/ts` que faz proxy transparente com os headers corretos
+10. Quando `MANIFEST_PARSED` dispara: **desmuta**, esconde overlay, entra em fullscreen, exibe info bar
 
 ---
 
@@ -107,8 +115,6 @@ O scraping é necessário porque os players ficam atrás de Cloudflare Turnstile
 - IP é registrado a cada hit em `/stream`
 - TTL de 30s — IP some da contagem se não bater stream dentro desse tempo
 - Log impresso quando novo IP conecta: `[dd/mm HH:MM:SS] Novo IP (x.x.x.x) conectado. Total ativos: (N).`
-- SSE em `/status/stream` notifica em tempo real o número de dispositivos ativos
-
 **GET /status** — JSON (chamada de API) ou página HTML (browser):
 - JSON: `{"devices": 2, "clients": [{"ip": "177.x.x.x", "connected_for": "1h 23m"}, ...]}`
 - HTML: página monospace dark com contador de dispositivos, dot pulsante e tabela IP/tempo. Atualiza a cada 5s via `setInterval` + fetch no próprio `/status`.
@@ -124,12 +130,12 @@ O scraping é necessário porque os players ficam atrás de Cloudflare Turnstile
 | GET | `/` | Frontend (player.html) |
 | GET | `/channels` | Lista de canais com URLs encriptadas |
 | GET | `/games` | Jogos ao vivo (proxia GAMES_API_URL, faz match com canais disponíveis) |
-| GET | `/resolve?url=` | Inicia resolve assíncrono do stream |
-| GET | `/resolve/status?url=` | Retorna `loading \| ready \| error \| unknown` |
-| GET | `/stream?url=` | m3u8 com segmentos proxiados |
+| GET | `/resolve/<slug>` | Inicia resolve assíncrono do stream |
+| GET | `/resolve/status/<slug>` | Retorna `loading \| ready \| error \| unknown` |
+| GET | `/<slug>` | m3u8 com segmentos proxiados |
+| WS  | `/ws/<slug>` | Sinal "go": relay → `{seq, dur, wall_ts, server_ts}` · cliente recebe e carrega o stream |
 | GET | `/proxy/ts?url=` | Proxy de segmento .ts |
 | GET | `/status` | Dispositivos ativos — JSON (Accept padrão) ou página HTML com polling 5s (Accept: text/html) |
-| GET | `/status/stream` | SSE — emite count de ativos a cada mudança |
 | GET | `/cache-status` | Página HTML com status do cache por canal (verde = válido + idade, vermelho = sem cache) |
 | GET | `/manifest.json` | PWA manifest |
 | GET | `/sw.js` | Service Worker |
@@ -139,7 +145,9 @@ O scraping é necessário porque os players ficam atrás de Cloudflare Turnstile
 
 ## Segurança
 
-URLs de canais e segmentos são **encriptadas com AES-256-GCM** (biblioteca `cryptography`) antes de ir ao cliente. A chave é `PROXY_SECRET` (hex 64 chars = 256 bits). Sem essa chave fixada no `.env`, cada restart gera uma nova chave e sessões abertas recebem 400 ao tentar usar URLs antigas.
+**URLs de segmentos** são encriptadas com AES-256-GCM (biblioteca `cryptography`) antes de aparecer no M3U8. A chave é `PROXY_SECRET` (hex 64 chars = 256 bits). Sem essa chave fixada no `.env`, cada restart gera uma nova chave e sessões abertas recebem 400 ao tentar usar segmentos antigos.
+
+URLs de canais **não** são encriptadas — o frontend usa slugs plain text (ex: `/stream/premiere`, `/resolve/espn`). Os slugs são derivados do último segmento da URL de player configurada no `.env`.
 
 ---
 
@@ -156,19 +164,26 @@ Roda em background thread com timezone `America/Sao_Paulo`:
 
 O warmup em dev (`ENVIRONMENT != PRODUCTION`) dispara imediatamente ao subir. O app é iniciado diretamente com `python app.py` — sem systemd, o `os.execv` mantém o mesmo terminal.
 
-**`is_stream_alive(url)`** — função central de validação em `scraper.py`. Chamada em dois momentos:
-1. **Inserção no pool** (`_accumulate_bg`) — URL resolvida pelo Chromium é validada antes de persistir. Se falhar, descartada sem entrar no `cache.json`.
-2. **Warmup** — valida entradas existentes; remove mortas via `_evict_url`.
+**`check_stream(url)`** — função central de validação em `scraper.py` (tristate):
+- `'alive'` — M3U8 válido, live, P2P ok
+- `'dead'` — 404, `#EXT-X-ENDLIST` presente, P2P 404 ou status 4xx (erro permanente)
+- `'transient'` — 5xx, timeout ou falha de rede (erro temporário)
 
-Critérios de validação:
-1. GET na URL → `status_code < 400` + body começa com `#EXTM3U`
-2. Ausência de `#EXT-X-ENDLIST` (stream live nunca termina)
-3. HEAD no PNG de P2P (`cdn.nossoplayer.site/{hash}.png`) embutido no M3U8 — se 404, stream sem P2P, player bloqueia; erro de rede não descarta (evita falso positivo por latência)
-4. Canais sem linha de PNG (ex: Globo com CDN direto) passam sem a verificação P2P
+Chamada indiretamente por dois wrappers com filosofia distinta:
+- **`is_stream_alive(url)`** — retorna `check_stream == 'alive'`. Usada na **inserção** (`_accumulate_bg`): conservadora ao adicionar.
+- **`is_stream_definitely_dead(url, attempts=3, delay=5s)`** — usada na **evicção** (warmup): retorna `True` só se alguma tentativa for `'dead'`; se todas forem `'transient'`, retorna `False` (CDN instável não causa remoção).
 
-**Lógica de skip no warmup:** após validar e remover mortas, se `pool_size >= MIN_POOL_SIZE` → pula. Se parcial (ou vazio) → resolve via Chromium para acumular mais uma URL.
+Critérios de `'dead'`:
+1. GET → status 404 ou qualquer 4xx
+2. Body não começa com `#EXTM3U`
+3. `#EXT-X-ENDLIST` presente (stream encerrado)
+4. HEAD no PNG de P2P retorna 404 (sem P2P → player bloqueia)
 
-**Prevenção de loop:** sem validação na inserção, o scraper poderia resolver uma URL inválida (ex: Paramount+ sem P2P), adicioná-la ao cache, o warmup removê-la, e o ciclo se repetir indefinidamente. A validação na inserção quebra o loop — URL ruim nunca persiste.
+**Princípio:** difícil entrar, mais difícil sair. Falha transiente de CDN não deve jamais custar uma URL válida do pool.
+
+**Lógica de skip no warmup:** após validar e remover confirmadamente mortas, se `pool_size >= MIN_POOL_SIZE` → pula. Se parcial (ou vazio) → resolve via Chromium para acumular mais uma URL.
+
+**Prevenção de loop:** validação na inserção garante que URL ruim (ex: Paramount+ sem P2P) nunca persiste no cache.
 
 ---
 
@@ -234,11 +249,13 @@ Critérios de validação:
 
 **Mock de jogos:** removido. `/games` retornando vazio ou falhando resulta em lista vazia — nenhum fallback.
 
-**Tratamento de erro HLS.js — buffer-aware:**
-Quando o HLS.js reporta um erro `fatal` (desistiu de tentar), o comportamento depende do buffer disponível:
-- **Buffer > 2s:** instância HLS é destruída (para requests), mas o erro é suprimido. Um `setInterval` de 1s monitora o buffer restante. Só exibe overlay de erro quando restar ≤ 0.5s — o usuário assiste até o buffer esgotar sem interrupção.
-- **Buffer ≤ 2s ou vazio:** mostra o erro imediatamente.
-- Guard `_currentUrl === url` evita exibir overlay se o usuário trocou de canal enquanto o buffer drenava.
+**Tratamento de erro HLS.js — reconexão automática:**
+Quando o HLS.js reporta um erro `fatal` (desistiu de tentar), o cliente entra em modo de reconexão automática — sem exibir erro, sem botão de retry:
+- **Buffer > 2s:** instância HLS é destruída (para requests). Um `setInterval` de 1s monitora o buffer restante; quando restar ≤ 0.5s chama `_reconnect`.
+- **Buffer ≤ 2s ou vazio:** chama `_reconnect` imediatamente.
+- **`_reconnect(slug, meta)`:** exibe overlay "Reconectando…" (loading) e faz polling `GET /<slug>` a cada 3s. Quando o relay responder 200, chama `playStream` automaticamente — o usuário não precisa interagir.
+- Erros de network não-fatais: HLS.js gerencia retry internamente (não chama `startLoad()` manualmente para evitar flood de requests ao backend).
+- Guard `_currentSlug === slug` cancela reconexão se o usuário trocou de canal.
 
 **Logos disponíveis:** Band Sports, ESPN, ESPN 2, ESPN 4, Globo, Paramount+, Premiere, Premiere 2, Premiere 3, Prime Video, SBT, SporTV, SporTV 2, TNT, RecordTV, Disney+
 
@@ -253,7 +270,7 @@ O app é exposto via **Cloudflare Tunnel** (cloudflared) — sem IP público exp
 **Configurações ativas no dashboard:**
 - HTTP/2, HTTP/3 (QUIC), TLS 1.3, 0-RTT — todos habilitados
 - Sempre usar HTTPS — habilitado
-- WebSockets — habilitado (necessário para SSE em `/status/stream`)
+- WebSockets — habilitado
 - **Cache Rule "TS Files":** `/proxy/ts*` → qualificado para cache, Edge TTL 30s — segmentos `.ts` são servidos do edge Cloudflare sem bater no servidor quando já cacheados
 
 **Header `X-Accel-Buffering: no`** na resposta do `/proxy/ts` — impede o Cloudflare de acumular o segmento inteiro antes de repassar ao cliente (crítico para live streaming).
@@ -315,6 +332,29 @@ O `_CACHE` do `scraper.py` é salvo em `cache.json` na raiz do projeto.
 
 ---
 
+## check_cache.py — Recuperação de URLs do histórico
+
+Script utilitário para reaproveitar URLs registradas no `stream_log.txt` que ainda não estão no `cache.json`.
+
+**Uso:**
+```bash
+python check_cache.py              # testa e salva
+python check_cache.py --dry-run    # apenas testa, não salva
+python check_cache.py --workers 12 # mais threads (padrão: 8)
+```
+
+**Comportamento:**
+1. Lê `stream_log.txt`, dedup por hash de canal
+2. Carrega `cache.json`, coleta todos os hashes presentes
+3. Testa apenas hashes **não** presentes no cache (evita re-testar o que já está válido)
+4. Adiciona entradas `'alive'` ao cache com `time.time()` como timestamp (TTL começa do momento do teste, não do registro no log)
+
+**É estritamente insert-only** — nunca remove nem modifica entradas existentes no `cache.json`. Remoção de URLs mortas é responsabilidade do warmup e do `StreamRelay`.
+
+Saída por URL: `✓ alive`, `✗ dead` ou `~ transient` com hash e nome do canal.
+
+---
+
 ## Atalhos de teclado
 
 | Tecla | Ação |
@@ -325,22 +365,17 @@ O `_CACHE` do `scraper.py` é salvo em `cache.json` na raiz do projeto.
 
 ## Segurança implementada
 
-- **AES-256-GCM nas URLs** — cliente nunca vê URLs reais de canais ou segmentos
+- **AES-256-GCM nos segmentos** — cliente nunca vê URLs reais dos segmentos `.ts`. URLs de canais usam slugs plain text.
 - **Rate limiting global** via `before_request`: 120 req/min por IP (sliding window com `deque`). Retorna 429. Rotas isentas: `/proxy/ts`, `/sw.js`, `/favicon.ico`, `/manifest.json`, qualquer path em `/static/` — assets estáticos e segmentos HLS não contam no limite para não interromper a reprodução
 - **Auth em `/status`** via env `STATUS_TOKEN` — passar como `?token=X` ou `Authorization: Bearer X`. Se não definido, rota fica aberta
-
-## Monitoramento SSE — expiração automática
-
-Thread `_expiry_watcher` roda a cada 10s e compara o count de IPs ativos. Se mudou (por expiração natural de TTL), faz push no SSE — garante que o painel atualize mesmo sem novos connects.
-
----
 
 ## Decisões de Design Notáveis
 
 - **Lock por URL no scraper:** impede múltiplos browsers simultâneos para o mesmo canal. Timeout de 90s.
 - **Resolve assíncrono:** o frontend não bloqueia — dispara o resolve e faz polling, permitindo troca de canal enquanto resolve.
-- **Reescrita dos segmentos m3u8:** necessária para que o browser busque os `.ts` via proxy (evita CORS e headers de autenticação do servidor original).
-- **Pool por canal:** múltiplas URLs por canal acumuladas ao longo do tempo. `_evict_url` remove só a morta; `_evict_cache` limpa tudo quando todas falham. Histórico completo em `stream_log.txt`.
+- **Reescrita dos segmentos m3u8:** necessária para que o browser busque os `.ts` via proxy (evita CORS e headers de autenticação do servidor original). Feita pelo relay antes de cachear.
+- **StreamRelay:** elimina latência de CDN do caminho crítico. HLS.js re-busca o manifesto a cada ~2-6s; o relay já tem o próximo pronto. Falha de CDN não trava o front — relay troca de fonte silenciosamente. Múltiplos clientes no mesmo canal compartilham um único relay (eficiência de CDN).
+- **Pool por canal:** múltiplas URLs por canal acumuladas ao longo do tempo. `_evict_url` remove só a morta. Histórico completo em `stream_log.txt`.
 - **IP TTL de 30s:** considera dispositivo ativo enquanto está consumindo o stream (HLS.js bate o servidor a cada ~2-6s).
 - **Rate limit sem dependência externa:** implementado com `deque` da stdlib, sem Flask-Limiter ou Redis.
 
@@ -406,10 +441,31 @@ Os hashes conhecidos ficam em `cache.json` e `stream_log.txt`.
 - `_evict_cache` limpa o pool todo (só quando todas as URLs falham)
 - Warmup valida todas as URLs do pool via `is_stream_alive()`; remove mortas; só pula o canal se ainda `>= MIN_POOL_SIZE` vivas
 
-**Failover em `/stream` (`app.py`):**
-- Itera o pool em ordem; URL morta (4xx **ou timeout/exceção**) → `_evict_url` + `continue`, tenta próxima
-- Só faz evict total (`_evict_cache`) quando todas as URLs do pool falham
-- Chromium roda cada vez menos conforme o pool cresce
+**StreamRelay — arquitetura de relay por canal (`app.py`):**
+- Um `StreamRelay` por canal ativo, criado no `/resolve` assim que o pool fica disponível
+- Loop de background (`_run`): busca M3U8 do CDN a cada 2s, reescreve segmentos, cacheia
+- `/<slug>` consulta `relay.get_m3u8(timeout=5)` — retorno quase instantâneo na maioria dos casos (relay já buscou antes)
+- Failover de fonte: 3 falhas consecutivas na fonte atual → troca para outra URL do pool
+- 404 permanente → remove URL do pool via `_evict_url`, força troca de fonte
+- Erros transientes (timeout, 5xx) → incrementa contador, troca de fonte após threshold, não descarta do pool
+- Relay sem acesso por 5 min → parado automaticamente pelo `_relay_cleanup_loop`
+- Múltiplos clientes assistindo o mesmo canal → compartilham o mesmo relay (uma busca CDN serve todos)
+
+**Segment cache (`_SEG_CACHE`):**
+- O relay pre-busca cada segmento novo em background assim que aparece no M3U8 (`_prefetch`)
+- `/proxy/ts` serve do cache em RAM; só vai ao CDN se o segmento ainda não estiver cacheado
+- Resultado: todos os clientes recebem os mesmos bytes do mesmo cache — sincronismo de conteúdo
+- TTL: 20s (além disso o segmento já passou do live edge e não será mais requisitado)
+- Evicção automática a cada `_seg_put` — entradas expiradas são removidas
+
+**WebSocket (`/ws/<slug>`) — sinal de "go" para carregamento coordenado:**
+- Relay faz broadcast a cada ciclo de 2s (+ mid-tick em 1s para reduzir delay de entrada)
+- **Propósito:** cliente só chama `hls.loadSource` após receber o primeiro tick do relay — garante que o backend já tem M3U8 válido antes de o player tentar carregar, evitando tentativas com URLs ruins/não resolvidas
+- **Canal unidirecional (backend → cliente):** relay envia `{seq, dur, wall_ts, server_ts}` periodicamente; cliente não envia estado
+- `hls.loadSource` chamado no primeiro WS tick (`_onFirstSync`) — todos os clientes que abrirem o mesmo canal num mesmo período carregam juntos (consequência natural do "go" compartilhado)
+- WS mantido aberto para detectar desconexão (thread `_reader` fica em `ws.receive()` — quando retorna `None`, coloca `_SENTINEL` na fila e encerra o handler)
+- `_WS_CHANNELS`: dict slug → list de `{q: Queue}` — uma fila por cliente conectado
+- Sincronismo de posição entre clientes **não implementado** — tentativas de correção via `playbackRate` causavam instabilidade (diff instável por discretização do `playingDate`, oscilação pós-stall, burst duplo). Clientes podem divergir gradualmente pela natureza do HLS live; o `_SEG_CACHE` garante que todos recebem os mesmos bytes, mas a posição exata depende do momento de entrada de cada cliente
 
 ### TTL confirmado
 
