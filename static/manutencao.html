@@ -1,0 +1,104 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <meta name="theme-color" content="#e8ff47"/>
+  <link rel="icon" type="image/png" sizes="32x32" href="/static/icons/logo-32.png"/>
+  <title>Gol AO VIVO TV — Manutenção</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com"/>
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin/>
+  <link href="https://fonts.googleapis.com/css2?family=Bebas+Neue&family=DM+Mono:wght@400;500&display=swap" rel="stylesheet"/>
+  <style>
+    *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+
+    :root{
+      --bg:#0a0a0f;--surface:#111118;--border:#1e1e2e;
+      --accent:#e8ff47;--text:#e8e8f0;--muted:#555570;
+    }
+
+    body{
+      background:var(--bg);color:var(--text);font-family:'Bebas Neue',sans-serif;
+      min-height:100vh;display:flex;flex-direction:column;
+      align-items:center;justify-content:center;
+      padding:32px 16px;gap:0;user-select:none;
+    }
+
+    body::before{
+      content:'';position:fixed;inset:0;
+      background-image:
+        linear-gradient(var(--border) 1px,transparent 1px),
+        linear-gradient(90deg,var(--border) 1px,transparent 1px);
+      background-size:48px 48px;opacity:.25;pointer-events:none;z-index:0;
+    }
+
+    .card{
+      position:relative;z-index:1;
+      display:flex;flex-direction:column;align-items:center;gap:28px;
+      background:var(--surface);border:1px solid var(--border);
+      border-radius:16px;padding:48px 40px;max-width:480px;width:100%;
+      text-align:center;
+    }
+
+    .logo{
+      font-size:1.6rem;letter-spacing:-.02em;color:var(--accent);
+    }
+
+    .icon{
+      font-size:3.5rem;line-height:1;
+      animation:pulse 2.5s ease-in-out infinite;
+    }
+
+    @keyframes pulse{
+      0%,100%{transform:scale(1);opacity:1}
+      50%{transform:scale(1.08);opacity:.75}
+    }
+
+    .title{
+      font-size:2.2rem;letter-spacing:.04em;color:var(--text);line-height:1.1;
+    }
+
+    .subtitle{
+      font-family:'DM Mono',monospace;font-size:.82rem;
+      color:var(--muted);line-height:1.6;
+    }
+
+    .badge{
+      font-family:'DM Mono',monospace;font-size:.75rem;
+      background:#1a1a26;border:1px solid var(--border);
+      color:var(--accent);padding:6px 16px;border-radius:999px;
+      letter-spacing:.08em;
+    }
+
+    .dots{display:inline-flex;gap:5px;align-items:center}
+    .dots span{
+      width:6px;height:6px;border-radius:50%;background:var(--accent);
+      animation:blink 1.2s ease-in-out infinite;
+    }
+    .dots span:nth-child(2){animation-delay:.2s}
+    .dots span:nth-child(3){animation-delay:.4s}
+
+    @keyframes blink{
+      0%,100%{opacity:.2}
+      50%{opacity:1}
+    }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <div class="logo">⚽ GOL AO VIVO TV</div>
+    <div class="icon">🔧</div>
+    <div class="title">EM MANUTENÇÃO</div>
+    <p class="subtitle">
+      Estamos fazendo ajustes para melhorar<br>
+      sua experiência. Voltamos em breve.
+    </p>
+    <div class="badge">
+      <span class="dots">
+        <span></span><span></span><span></span>
+      </span>
+      &nbsp; TRABALHANDO NISSO
+    </div>
+  </div>
+</body>
+</html>
