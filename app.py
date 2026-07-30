@@ -319,12 +319,15 @@ class StreamRelay:
         return None
 
     def _pick_source(self) -> dict | None:
-        pool = get_stream_pool(self._channel_url)
-        if not pool:
+        # pool abaixo do mínimo (mesmo que não vazio) — resolve_stream já dispara
+        # acumulação em background nesse caso, dando mais opções pro próximo failover
+        if pool_size(self._channel_url) < _MIN_POOL_SIZE:
             try:
                 pool = resolve_stream(self._channel_url).get("streams", [])
             except Exception:
-                return None
+                pool = get_stream_pool(self._channel_url)
+        else:
+            pool = get_stream_pool(self._channel_url)
         if not pool:
             return None
         if self._active and len(pool) > 1:
@@ -622,7 +625,7 @@ def proxy_ts():
         )
     except Exception as e:
         _log(f"[proxy/ts] erro ao buscar segmento: {e}")
-        return str(e), 502
+        return "erro ao buscar segmento", 502
 
 
 

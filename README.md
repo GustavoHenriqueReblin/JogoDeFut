@@ -58,7 +58,9 @@ app.py (Flask)
 |---|---|---|
 | `CHANNELS` | Sim | Lista `Nome:URL,Nome:URL` dos canais. URL é a página do player do canal no site cloudflaire. |
 | `CLOUDFLAIRE_PLAYERS` | Sim | Mapeamento `host:fonte` — relaciona o domínio do player à fonte usada na API. Ex: `player.exemplo.com:globo` |
-| `GAMES_API_URL` | Sim | URL da API externa que retorna os jogos ao vivo em JSON |
+| `GAMES_API_URL` | Sim | URL do worker Cloudflare (`games-proxy`) que retorna os jogos ao vivo em JSON. O worker em si roda fora deste repo e busca os dados de uma API de jogos (domínio já mudou pra `api.reidoscanais.st`) — se `/games` parar de retornar dados, checar se o worker ainda aponta pro domínio certo, não é algo que se resolve aqui no `.env`. |
+| `TOKEN_API_URL` | **Sim** | URL do endpoint que troca o token do Turnstile pela URL do stream (`POST /get_token`). Sem default no código de propósito — esse domínio muda periodicamente (a API/CDN roda em domínios descartáveis que trocam quando um é banido) e não deve ficar hardcoded no source. Se o scraper começar a levar 403 de bloqueio de zona (página de erro do Cloudflare, não da API), é sinal de que o domínio mudou; atualizar aqui sem precisar mexer em código. |
+| `P2P_CDN_HOST` | **Sim** | Host usado pra identificar a linha do PNG de verificação P2P dentro do M3U8 (`check_stream`, ver seção de validação). Sem default no código de propósito, mesmo motivo do `TOKEN_API_URL`. Se esse host mudar, a validação de P2P para de detectar a linha e passa a considerar todo stream "sem P2P" como ok — ajustar aqui sem mexer em código. |
 | `PROXY_SECRET` | **Sim** | Chave hex 64 chars para encriptar URLs. **Deve estar fixada no `.env`** — se ausente, uma chave aleatória é gerada a cada restart, invalidando todas as URLs encriptadas em sessões abertas (erro 400). Gerar com `python -c "import secrets; print(secrets.token_hex(32))"` |
 | `PORT` | Não | Porta do servidor (padrão: 5000) |
 | `ENVIRONMENT` | Não | `PRODUCTION` desliga logs de debug. Qualquer outro valor (padrão `DEVELOPMENT`) habilita logs. |
@@ -97,12 +99,14 @@ O scraping é necessário porque os players ficam atrás de Cloudflare Turnstile
 1. `resolve_stream(player_url)` — verifica pool (TTL 48h). Pool completo → retorna imediatamente. Pool parcial → retorna o que tem e dispara acumulação em background (não bloqueia). Pool vazio → bloqueia até resolver. Só invoca Chromium se `pool_size < MIN_POOL_SIZE`
 2. `_do_resolve()` — extrai `host` e `channel` da URL, consulta `CLOUDFLAIRE_PLAYERS` para saber a `fonte`
 3. Chama `_scrape_token()` até 8 vezes com delays progressivos `[3,5,8,10,12,15,20]`s após 404
-4. `_scrape_token()` abre Chromium via Playwright (patchright), navega até a URL e captura o token Turnstile por 3 métodos:
-   - Interceptação de request (URL com `token=`)
-   - Interceptação de response body (JSON com `"token"`)
-   - Polling de DOM (`[name="cf-turnstile-response"]`)
-5. Com o token, faz `POST` na API externa (`/get_token`) com `{fonte, channel, token}`
-6. Retorna `{"url": "<hls_url>", "referer": player_url}` — entry adicionada ao pool do canal
+4. `_scrape_token()` abre Chromium via Playwright (patchright), navega até a URL e:
+   - **Prioridade (até ~15s) — interceptação da chamada `get_token` que o próprio site faz:** o player da página, ao carregar, resolve o Turnstile e chama a API de token sozinho, dentro do browser (com fingerprint de TLS real, cookies corretos etc.). O scraper intercepta essa response e extrai a `url` direto dali, sem precisar montar seu próprio request — **esse é o caminho confiável**, porque evita replay externo do token.
+   - **Fallback (mais ~15s), só se o site não resolver sozinho:** simula interação humana (mouse/scroll) e tenta capturar um token via DOM (`[name="cf-turnstile-response"]`) ou response do próprio Turnstile, para então fazer o `POST` manual via `requests`. Esse caminho é frágil: o Cloudflare consegue diferenciar o fingerprint TLS/HTTP de um cliente Python do de um Chrome real, então mesmo com token tecnicamente válido a API pode rejeitar (404) um POST feito fora do contexto do browser. Exige tamanho mínimo de token (`_MIN_TOKEN_LEN`) consistente com challenges de alta confiança — tokens curtos são sistematicamente rejeitados pela API mesmo passando na validação de formato.
+5. Retorna `{"url": "<hls_url>", "referer": player_url}` — entry adicionada ao pool do canal
+
+**Detecção de automação:** mesmo com Playwright via patchright (anti-detecção), o Cloudflare pode identificar a sessão como automatizada e entregar tokens de confiança reduzida. Simular interação humana (mouse/scroll) pós-carregamento não altera esse resultado quando a decisão já é tomada no fingerprint do ambiente antes da interação — nesses casos, a captura direta da `url` (item 4 acima) é o único caminho que funciona de forma confiável.
+
+**Extração do hash do canal:** o hash é sempre um MD5 (32 chars hex) no path da stream URL, mas o separador e a posição podem variar conforme o formato vigente do CDN (ex: `fonte_{hash}/arquivo` ou `fonte/{hash}/arquivo`). Importante: o **host do CDN também é um MD5 sequencial** (ver seção de infraestrutura abaixo), então a extração pega o **último** match de 32-hex na URL — o hash do canal sempre vem depois do host no path.
 
 **Proteção contra bloqueio de IP no warmup:** após 3 falhas consecutivas, aguarda 5 minutos antes de continuar.
 
@@ -400,14 +404,16 @@ Saída por URL: `✓ alive`, `✗ dead` ou `~ transient` com hash e nome do cana
 
 ```
 api.<domínio>/get_token
-  └→ retorna { token: "<hash_canal>", url: "https://<cdn-host>/assets/themes/<player>_<hash_canal>/style.css" }
+  └→ retorna { token: "<hash_canal>", url: "https://<cdn-host>/<player>/<hash_canal>/<arquivo-disfarçado>" }
 
-m3u8 (disfarçado de .css) contém segmentos:
+m3u8 disfarçado de arquivo estático contém segmentos:
   https://cdn.<domínio-segmentos>/<hash>.png   ← domínio fixo, entrega P2P
 
   Se esse PNG retorna 404 → P2P indisponível → player bloqueia o stream mesmo com #EXTM3U válido.
   Canais sem P2P (ex: Globo RJ) podem ter CDN direto e não referenciarem esse PNG — ausência da linha é ok.
 ```
+
+> **Nota:** a extensão/nome do arquivo disfarçado e o path da URL já mudaram mais de uma vez (`style.css` → `file.txt`, `<player>_<hash>/` com underscore → `<player>/<hash>/` com barra). Nenhum desses detalhes é hardcoded no parsing — `_channel_hash` (scraper.py) extrai o hash pelo formato MD5 (32 chars hex), não pelo nome do arquivo ou separador, então mudanças futuras nesse padrão não devem quebrar a extração.
 
 #### CDN host — totalmente previsível
 

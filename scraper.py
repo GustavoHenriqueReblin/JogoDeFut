@@ -32,6 +32,8 @@ _HEADLESS = os.environ.get("HEADLESS_DEBUG", "").lower() != "true"
 _CACHE: dict[str, list[tuple[float, dict]]] = {}
 _CACHE_TTL = 172800       # 48h — TTL confirmado >24h, margem de segurança
 _MIN_POOL_SIZE = int(os.environ.get("MIN_POOL_SIZE", 5))
+_TOKEN_API_URL = os.environ["TOKEN_API_URL"]
+_P2P_CDN_HOST = os.environ["P2P_CDN_HOST"]
 _LOCKS: dict[str, threading.Lock] = {}
 _LOCKS_META = threading.Lock()
 
@@ -123,7 +125,7 @@ def check_stream(stream_url: str) -> str:
             return "dead"        # stream encerrado
         p2p_png = next(
             (l.strip() for l in body.splitlines()
-             if "cdn.nossoplayer.site" in l and l.strip().endswith(".png")),
+             if _P2P_CDN_HOST in l and l.strip().endswith(".png")),
             None,
         )
         if p2p_png:
@@ -203,58 +205,69 @@ def _evict_url(player_url: str, stream_url: str):
 
 # ── Scraping ──────────────────────────────────────────────────────────────────
 
-async def _scrape_token(page_url: str) -> str | None:
+_MIN_TOKEN_LEN = 1200  # tokens aceitos pela API observados manualmente: ~1300-1450 chars
+
+
+_DIRECT_URL_TIMEOUT = 15   # espera pela chamada get_token que o site faz sozinho
+_FALLBACK_TOKEN_TIMEOUT = 15  # espera pelo token no DOM, só se o direct_url não vier
+
+
+async def _simulate_human_interaction(page):
+    """Gera sinais comportamentais (mouse/scroll). Só ajuda como último recurso
+    no fallback — quando o Cloudflare já classificou a sessão como automatizada
+    pelo fingerprint do ambiente, isso não muda o resultado (observado: token
+    idêntico entre tentativas mesmo com interação)."""
+    import random
+    try:
+        for _ in range(6):
+            x, y = random.randint(50, 800), random.randint(50, 600)
+            await page.mouse.move(x, y, steps=random.randint(5, 15))
+            await asyncio.sleep(random.uniform(0.1, 0.3))
+        await page.mouse.wheel(0, random.randint(100, 300))
+        await asyncio.sleep(random.uniform(0.2, 0.4))
+        await page.mouse.wheel(0, -random.randint(50, 150))
+    except Exception as ex:
+        _log(f"[scraper] erro ao simular interação: {ex}")
+
+
+async def _scrape_token(page_url: str) -> tuple[str | None, str | None]:
+    """Retorna (token, direct_url).
+
+    direct_url: capturado interceptando a própria chamada get_token que o site
+    faz sozinho dentro do browser — caminho confiável, evita replay externo do
+    token (fingerprint TLS/HTTP de `requests` é diferente de um Chrome real e
+    a API rejeita mesmo com token válido).
+
+    token: fallback só usado se o site não fizer a chamada sozinho (permite ao
+    chamador tentar o replay manual via requests, mesmo sabendo que pode falhar)."""
     token = None
+    direct_url = None
 
     def _make_interceptors(page):
-        async def intercept(request):
-            nonlocal token
-            if "challenges.cloudflare.com/turnstile" in request.url and "token=" in request.url:
-                m = re.search(r"token=([^&]+)", request.url)
-                if m:
-                    t = m.group(1)
-                    if t.count('.') >= 2 and len(t) > 100:
-                        token = t
-                        _log(f"[scraper] token capturado via URL len={len(t)}")
-
         async def intercept_response(response):
-            nonlocal token
-            if token:
-                return
-            if "challenges.cloudflare.com" in response.url:
+            nonlocal token, direct_url
+            if "get_token" in response.url:
                 try:
                     body = await response.text()
-                    m = re.search(r'"token"\s*:\s*"([^"]+)"', body)
+                    m = re.search(r'"url"\s*:\s*"([^"]+)"', body)
                     if m:
-                        t = m.group(1)
-                        if t.count('.') >= 2 and len(t) > 100:
-                            token = t
-                            _log(f"[scraper] token capturado via response body len={len(t)}")
+                        direct_url = m.group(1).replace("\\/", "/")
+                        _log("[scraper] URL capturada direto da chamada get_token do próprio site")
                 except Exception:
                     pass
-
-        page.on("request", intercept)
-        page.on("response", intercept_response)
-
-    async def _poll_token(page, attempts=30):
-        nonlocal token
-        for i in range(attempts):
-            if token:
-                break
+                return
+            if token or "challenges.cloudflare.com" not in response.url:
+                return
             try:
-                t = await page.evaluate("""() => {
-                    const el = document.querySelector('[name="cf-turnstile-response"]');
-                    return el ? el.value : null;
-                }""")
-                if t and t.count('.') >= 2 and len(t) > 100:
-                    token = t
-                    _log(f"[scraper] token capturado via DOM (tentativa {i+1}) len={len(t)}")
-                    break
-            except Exception as ex:
-                _log(f"[scraper] erro ao ler DOM (tentativa {i+1}): {ex}")
-            if (i + 1) % 5 == 0:
-                _log(f"[scraper] aguardando token... {i+1}/{attempts}s")
-            await asyncio.sleep(1)
+                body = await response.text()
+                m = re.search(r'"token"\s*:\s*"([^"]+)"', body)
+                if m and m.group(1).count('.') >= 2 and len(m.group(1)) > _MIN_TOKEN_LEN:
+                    token = m.group(1)
+                    _log(f"[scraper] token capturado via response body len={len(token)}")
+            except Exception:
+                pass
+
+        page.on("response", intercept_response)
 
     _log(f"[scraper] abrindo browser para: {page_url}")
     async with async_playwright() as pw:
@@ -264,21 +277,41 @@ async def _scrape_token(page_url: str) -> str | None:
         _make_interceptors(page)
         try:
             await page.goto(page_url, wait_until="domcontentloaded", timeout=60000)
-            title = await page.title()
-            _log(f"[scraper] página carregada: {title}")
             await page.bring_to_front()
-            await _poll_token(page)
+
+            for _ in range(_DIRECT_URL_TIMEOUT):
+                if direct_url:
+                    break
+                await asyncio.sleep(1)
+
+            if not direct_url:
+                _log("[scraper] site não resolveu sozinho, tentando fallback (interação + DOM)")
+                await _simulate_human_interaction(page)
+                for _ in range(_FALLBACK_TOKEN_TIMEOUT):
+                    if direct_url or token:
+                        break
+                    t = await page.evaluate("""() => {
+                        const el = document.querySelector('[name="cf-turnstile-response"]');
+                        return el ? el.value : null;
+                    }""")
+                    if t and t.count('.') >= 2 and len(t) > _MIN_TOKEN_LEN:
+                        token = t
+                        _log(f"[scraper] token capturado via DOM len={len(t)}")
+                        break
+                    await asyncio.sleep(1)
         except Exception as e:
             _log(f"[scraper] erro ao carregar página: {e}")
         finally:
             await ctx.close()
             await browser.close()
 
-    if token:
-        _log("[scraper] token obtido com sucesso")
+    if direct_url:
+        _log("[scraper] resolvido via URL direta")
+    elif token:
+        _log(f"[scraper] resolvido via token de fallback (len={len(token)}), qualidade incerta")
     else:
-        print("[scraper] FALHA: token não encontrado após 30s")
-    return token
+        _log("[scraper] FALHA: nem direct_url nem token válido capturados")
+    return token, direct_url
 
 
 def _get_lock(key: str) -> threading.Lock:
@@ -289,9 +322,13 @@ def _get_lock(key: str) -> threading.Lock:
 
 
 def _channel_hash(stream_url: str) -> str | None:
-    """Extrai o hash do canal da stream URL (nossoplayer_{hash}/style.css)."""
-    m = re.search(r"nossoplayer_([a-f0-9]+)/", stream_url)
-    return m.group(1) if m else None
+    """Extrai o hash do canal da stream URL — formato MD5 (32 hex chars),
+    independente do separador usado (ex: nossoplayer_{hash}/style.css ou
+    nossoplayer/{hash}/file.txt). O host do CDN também é um MD5 sequencial
+    (ver README), então pega o ÚLTIMO match — o hash do canal sempre vem
+    depois do host no path, nunca antes."""
+    matches = re.findall(r"[a-f0-9]{32}", stream_url)
+    return matches[-1] if matches else None
 
 
 def _accumulate_bg(player_url: str):
@@ -368,14 +405,17 @@ def _do_resolve(player_url: str) -> dict | None:
 
     for attempt in range(_MAX_ATTEMPTS):
         _log(f"[scraper] tentativa {attempt+1}/{_MAX_ATTEMPTS} de obter token")
-        token = asyncio.run(_scrape_token(player_url))
+        token, direct_url = asyncio.run(_scrape_token(player_url))
+        if direct_url:
+            _log(f"[scraper] usando URL capturada direto do browser (sem replay via requests): {direct_url}")
+            return {"url": direct_url, "referer": player_url}
         if not token:
             _log(f"[scraper] FALHA na tentativa {attempt+1}: sem token")
             return None
         try:
             _log(f"[scraper] POST get_token (tentativa {attempt+1})...")
             r = _http.post(
-                "https://api.cloudflaire.lat/get_token",
+                _TOKEN_API_URL,
                 headers={
                     "content-type": "application/json",
                     "accept": "*/*",
