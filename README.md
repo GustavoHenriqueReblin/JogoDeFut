@@ -65,6 +65,7 @@ app.py (Flask)
 | `PORT` | Não | Porta do servidor (padrão: 5000) |
 | `ENVIRONMENT` | Não | `PRODUCTION` desliga logs de debug. Qualquer outro valor (padrão `DEVELOPMENT`) habilita logs. |
 | `WARMUP_ENABLED` | Não | `true` habilita warmup automático dos canais às 05h, 12h e 18h |
+| `RESTART_ENABLED` | Não | `true` habilita o restart automático de 04h (`os.execv`-like via subprocess, ver seção Scheduler). **Padrão: `false` (desativado)** — app roda 24/7 sem restart programado. |
 | `WARMUP_WORKERS` | Não | Número de canais resolvidos em paralelo no warmup (padrão: 2) |
 | `MIN_POOL_SIZE` | Não | Tamanho mínimo do pool de URLs por canal antes de invocar Chromium (padrão: 5) |
 | `HEADLESS_DEBUG` | Não | `true` abre o browser visível durante scraping (útil para debug local) |
@@ -161,12 +162,12 @@ Roda em background thread com timezone `America/Sao_Paulo`:
 
 | Horário | Job |
 |---|---|
-| 04h00 | Reinício via `os.execv` — substitui o processo em-place (mesmo PID, mesmo terminal). Aguarda 2s antes de executar para a porta ser liberada. |
+| 04h00 | Reinício via subprocess detached (`_midnight_restart`) — sobe um novo processo e derruba o atual (`os._exit`). **Desativado por padrão** (`RESTART_ENABLED=false`) — só é agendado se `RESTART_ENABLED=true` no `.env`. Com o restart desligado, o app roda 24/7 sem interrupção programada. |
 | 05h00 | Warmup de todos os canais (se `WARMUP_ENABLED=true`) — pool vazio da madrugada |
 | 12h00 | Warmup de todos os canais (se `WARMUP_ENABLED=true`) — cobre jogos europeus (13h–17h) |
 | 18h00 | Warmup de todos os canais (se `WARMUP_ENABLED=true`) — cobre jogos sul-americanos (19h–23h) |
 
-O warmup em dev (`ENVIRONMENT != PRODUCTION`) dispara imediatamente ao subir. O app é iniciado diretamente com `python app.py` — sem systemd, o `os.execv` mantém o mesmo terminal.
+O warmup em dev (`ENVIRONMENT != PRODUCTION`) dispara imediatamente ao subir. O app é iniciado diretamente com `python app.py` — sem systemd.
 
 **`check_stream(url)`** — função central de validação em `scraper.py` (tristate):
 - `'alive'` — M3U8 válido, live, P2P ok

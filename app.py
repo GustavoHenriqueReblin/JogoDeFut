@@ -897,6 +897,7 @@ def _midnight_restart():
 
 
 _WARMUP_ENABLED = os.environ.get("WARMUP_ENABLED", "false").lower() == "true"
+_RESTART_ENABLED = os.environ.get("RESTART_ENABLED", "false").lower() == "true"
 
 
 def _start_scheduler():
@@ -911,11 +912,12 @@ def _start_scheduler():
         scheduler.add_job(_warmup_all_channels, CronTrigger(hour=5,  minute=0, timezone=tz), id="warmup_5h")
         scheduler.add_job(_warmup_all_channels, CronTrigger(hour=12, minute=0, timezone=tz), id="warmup_12h")
         scheduler.add_job(_warmup_all_channels, CronTrigger(hour=18, minute=0, timezone=tz), id="warmup_18h")
-        _log("[scheduler] agendamentos ativos: warmup 05h, 12h, 18h | restart 04h (America/Sao_Paulo)")
+        _log(f"[scheduler] agendamentos ativos: warmup 05h, 12h, 18h | restart 04h: {'ativo' if _RESTART_ENABLED else 'DESATIVADO'} (America/Sao_Paulo)")
     else:
-        _log("[scheduler] warmup desativado (WARMUP_ENABLED=false) | restart 04h (America/Sao_Paulo)")
+        _log(f"[scheduler] warmup desativado (WARMUP_ENABLED=false) | restart 04h: {'ativo' if _RESTART_ENABLED else 'DESATIVADO'} (America/Sao_Paulo)")
 
-    scheduler.add_job(_midnight_restart, CronTrigger(hour=4, minute=0, timezone=tz), id="restart_4h")
+    if _RESTART_ENABLED:
+        scheduler.add_job(_midnight_restart, CronTrigger(hour=4, minute=0, timezone=tz), id="restart_4h")
     scheduler.start()
 
     from scraper import _IS_DEV
