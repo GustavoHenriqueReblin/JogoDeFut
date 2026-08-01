@@ -264,7 +264,7 @@ Quando o HLS.js reporta um erro `fatal` (desistiu de tentar), o cliente entra em
 
 **Logos disponíveis:** Band Sports, ESPN, ESPN 2, ESPN 4, Globo, Paramount+, Premiere, Premiere 2, Premiere 3, Prime Video, SBT, SporTV, SporTV 2, TNT, RecordTV, Disney+
 
-**Scraping (scraper.py)** — TTL do pool: 48h (`_CACHE_TTL = 172800`). Ver seção [Cache persistente](#cache-persistente).
+**Scraping (scraper.py)** — pool sem TTL, validade decidida por teste real. Ver seção [Cache persistente](#cache-persistente).
 
 ---
 
@@ -321,11 +321,10 @@ O `_CACHE` do `scraper.py` é salvo em `cache.json` na raiz do projeto.
 - **Cada entry:** `(timestamp, {"url": "...", "referer": "..."})` — uma URL por entry
 - **Carregado no import** do módulo (migra formato antigo automaticamente)
 - **Salvo em background thread** após cada resolve (não bloqueia a resposta), com `indent=2` para legibilidade
-- **`_valid_pool()`** filtra entradas dentro do TTL; **`_latest_valid()`** retorna a mais recente
-- **`_save_cache`** só persiste entradas ainda válidas — `cache.json` nunca acumula entradas expiradas
+- **Sem TTL — `_valid_pool()` retorna o pool inteiro, sem filtrar por idade.** Uma entrada não é considerada inválida só porque "passou tempo"; a validade é decidida por teste real: `is_stream_alive` na inserção (`_accumulate_bg`), `is_stream_definitely_dead` no warmup, e o próprio `StreamRelay` evictando em 404 confirmado durante o uso. `_latest_valid()` retorna a entrada mais recente do pool (todas são candidatas, não só as "não-expiradas").
+  > **Histórico:** havia um TTL de 48h (`_CACHE_TTL`) que filtrava o pool por idade. Isso causava um bug real em produção: quando uma entrada "expirava" pelo TTL mas a URL continuava funcionando de verdade, um novo resolve trazia o **mesmo hash** de volta — só que o dedup por hash comparava contra `_CACHE` inteiro (sem filtro de TTL), via a entrada antiga como "já presente" e não a readicionava. Resultado: pool ficava vazio pra sempre pro cliente (`_valid_pool` filtrando por TTL) mesmo a URL sendo válida, e o dedup impedia a correção. TTL removido — dedup por hash agora **atualiza o timestamp** da entrada existente em vez de ignorar.
 - **`_evict_url(url)`** remove só a URL morta; **`_evict_cache()`** limpa o pool todo
 - **Formato JSON:** `{ "player_url": [[timestamp, entry], ...] }`
-- **TTL:** 48h (`_CACHE_TTL = 172800`) — tokens confirmados ativos >24h, 48h como margem de segurança
 - Reiniciar o app não perde o cache — pool completo disponível imediatamente
 
 **Histórico de streams (`stream_log.txt`):** a cada novo resolve bem-sucedido, uma linha é appendada na raiz do projeto:
@@ -389,6 +388,7 @@ Saída por URL: `✓ alive`, `✗ dead` ou `~ transient` com hash e nome do cana
 ## TODO
 
 - [ ] **Validação de cache antes de servir** — warmup já valida via HEAD antes de cada resolve; `/stream` ainda serve diretamente do cache sem validar
+- [ ] **Detecção de stream "congelado" (dead air)** — `check_stream` valida estrutura do M3U8 (`#EXTM3U`, sem `#EXT-X-ENDLIST`, P2P ok) mas não verifica se o `MEDIA-SEQUENCE` está avançando. Observado em produção: canal com encoder de origem travado passa em todas as validações como `'alive'`, mas serve sempre a mesma janela de segmentos — reproduzido tanto pelo nosso relay quanto acessando o site da fonte diretamente pelo navegador (F5 + novo token + mesmo resultado travado), então não é cache de CDN, é a transmissão de origem parada. Fix proposto: no `check_stream`, buscar o M3U8 duas vezes com intervalo (~10s, a duração de um segmento) e comparar `MEDIA-SEQUENCE`; se não avançar, tratar como suspeito/morto. Trade-off: +10s de latência por validação (usada no warmup e na inserção no pool). Ainda não implementado — decisão pendente de custo/benefício.
 - [ ] **Jogos sem canal disponível** — backend filtra e não exibe. Avaliar mostrar como cards cinza com tooltip "Sem canal disponível" para o usuário saber que o jogo existe mas não tem transmissão configurada
 - [ ] **`_RESOLVE_STATUS` cresce indefinidamente** — nunca é limpo. Adicionar TTL ou LRU com limite de entradas
 - [ ] **`/health` endpoint** — rota simples para monitoramento externo (uptime bots, load balancer). Retornar `{"ok": true}`
@@ -474,7 +474,8 @@ Os hashes conhecidos ficam em `cache.json` e `stream_log.txt`.
 - `_WS_CHANNELS`: dict slug → list de `{q: Queue}` — uma fila por cliente conectado
 - Sincronismo de posição entre clientes **não implementado** — tentativas de correção via `playbackRate` causavam instabilidade (diff instável por discretização do `playingDate`, oscilação pós-stall, burst duplo). Clientes podem divergir gradualmente pela natureza do HLS live; o `_SEG_CACHE` garante que todos recebem os mesmos bytes, mas a posição exata depende do momento de entrada de cada cliente
 
-### TTL confirmado
+### TTL confirmado (histórico — TTL removido depois)
 
 - **>24h confirmado:** token de 29/05 20:38 ainda ativo em 30/05 20:41 (~24h03min)
-- **`_CACHE_TTL` atual:** 172800s (48h) — subido em 30/05/2026 após confirmação >24h. Continuar observando `stream_log.txt` para determinar se pode subir mais
+- **`_CACHE_TTL` na época:** 172800s (48h) — subido em 30/05/2026 após confirmação >24h
+- **TTL removido depois** (ver seção [Cache persistente](#cache-persistente)): filtrar por idade causava um bug real — entrada "expirava" mas a URL ainda funcionava, e o dedup por hash (que ignorava o TTL) impedia a re-inserção, deixando o pool vazio pra sempre. Validade hoje é só por teste real (vivo/morto), não por tempo.

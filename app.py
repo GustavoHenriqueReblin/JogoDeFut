@@ -17,7 +17,7 @@ import requests as http_req
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from scraper import (
     resolve_stream, _latest_valid, _evict_cache, _evict_url,
-    get_stream_pool, pool_size, _log, _CACHE_TTL, _MIN_POOL_SIZE,
+    get_stream_pool, pool_size, _log, _MIN_POOL_SIZE,
     is_stream_alive, is_stream_definitely_dead, _channel_hash,
 )
 
@@ -343,11 +343,17 @@ class StreamRelay:
         m3u8_url = source["url"]
         referer  = source.get("referer", "")
         headers  = dict(_PROXY_HEADERS)
+        headers["Cache-Control"] = "no-cache"
+        headers["Pragma"] = "no-cache"
         if referer:
             headers["Referer"] = referer
             headers["Origin"]  = referer.rstrip("/").rsplit("/", 1)[0]
+        # cache-busting: alguns CDNs cacheiam essa URL por engano (extensão
+        # disfarçada de asset estático), servindo sempre a mesma sequência
+        sep = "&" if "?" in m3u8_url else "?"
+        cache_busted_url = f"{m3u8_url}{sep}_={int(time.time() * 1000)}"
         try:
-            r = http_req.get(m3u8_url, headers=headers, timeout=10)
+            r = http_req.get(cache_busted_url, headers=headers, timeout=10)
             r.raise_for_status()
             fetch_time = time.time()
             raw_lines  = r.text.splitlines()
@@ -713,23 +719,16 @@ def cache_status():
         return jsonify({"error": "unauthorized"}), 401
     now = time.time()
     rows = []
-    dias_semana = ["seg", "ter", "qua", "qui", "sex", "sáb", "dom"]
-    now_dt = datetime.now()
     for ch in _parse_channels():
         entry = _latest_valid(ch["url"])
         sz = pool_size(ch["url"])
         if entry:
-            expires_ts = entry[0] + _CACHE_TTL
-            expires_dt = datetime.fromtimestamp(expires_ts)
-            if expires_dt.date() == now_dt.date():
-                expires_str = f"hoje {expires_dt.strftime('%H:%M')}"
-            elif expires_dt.date() == (now_dt + timedelta(days=1)).date():
-                expires_str = f"amanhã {expires_dt.strftime('%H:%M')}"
-            else:
-                expires_str = f"{dias_semana[expires_dt.weekday()]} {expires_dt.strftime('%H:%M')}"
-            rows.append({"name": ch["name"], "status": "ok", "expires": expires_str, "pool": sz})
+            # não expira mais por TTL — mostra há quanto tempo foi resolvido/
+            # renovado pela última vez, informativo, não indica invalidade
+            age_str = _fmt_duration(now - entry[0])
+            rows.append({"name": ch["name"], "status": "ok", "age": age_str, "pool": sz})
         else:
-            rows.append({"name": ch["name"], "status": "miss", "expires": None, "pool": 0})
+            rows.append({"name": ch["name"], "status": "miss", "age": None, "pool": 0})
 
     def _badge_class(r):
         if r["status"] != "ok": return "miss"
@@ -738,7 +737,7 @@ def cache_status():
 
     def _badge_text(r):
         if r["status"] != "ok": return "sem cache"
-        return f'✓ {r["pool"]} URL{"s" if r["pool"] != 1 else ""} · expira {r["expires"]}'
+        return f'✓ {r["pool"]} URL{"s" if r["pool"] != 1 else ""} · resolvido há {r["age"]}'
 
     html_rows = "".join(
         f'<tr>'

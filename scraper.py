@@ -29,8 +29,10 @@ _HEADLESS = os.environ.get("HEADLESS_DEBUG", "").lower() != "true"
 
 # player_url -> [(timestamp, stream_entry), ...]
 # stream_entry = {"url": "...", "referer": "..."}
+# Sem TTL — entradas não expiram por idade (ver _valid_pool). Validade é
+# decidida por teste real: is_stream_alive na inserção, is_stream_definitely_dead
+# no warmup, eviction do relay em 404 confirmado.
 _CACHE: dict[str, list[tuple[float, dict]]] = {}
-_CACHE_TTL = 172800       # 48h — TTL confirmado >24h, margem de segurança
 _MIN_POOL_SIZE = int(os.environ.get("MIN_POOL_SIZE", 5))
 _TOKEN_API_URL = os.environ["TOKEN_API_URL"]
 _P2P_CDN_HOST = os.environ["P2P_CDN_HOST"]
@@ -68,14 +70,13 @@ def _load_cache():
 
 
 def _save_cache():
-    now = time.time()
+    """Persiste tudo que está em _CACHE — sem filtro de TTL. A validade de uma
+    entrada é decidida por teste real (is_stream_alive na inserção,
+    is_stream_definitely_dead no warmup, eviction do relay em 404), não por
+    idade. Uma URL sem tráfego por dias pode continuar perfeitamente viva."""
     try:
         with _CACHE_WRITE_LOCK:
-            valid = {}
-            for url, pool in _CACHE.items():
-                entries = [[ts, entry] for ts, entry in pool if now - ts < _CACHE_TTL]
-                if entries:
-                    valid[url] = entries
+            valid = {url: [[ts, entry] for ts, entry in pool] for url, pool in _CACHE.items() if pool}
             with open(_CACHE_FILE, "w", encoding="utf-8") as f:
                 json.dump(valid, f, indent=2, ensure_ascii=False)
     except Exception as e:
@@ -166,9 +167,13 @@ def is_stream_definitely_dead(stream_url: str, attempts: int = 3, delay: float =
 # ── Pool helpers ──────────────────────────────────────────────────────────────
 
 def _valid_pool(player_url: str) -> list[tuple[float, dict]]:
-    """Retorna todas as entradas não expiradas do pool."""
-    now = time.time()
-    return [(ts, e) for ts, e in _CACHE.get(player_url, []) if 0 <= now - ts < _CACHE_TTL]
+    """Retorna todo o pool do canal. Sem filtro de TTL — uma URL não expira só
+    por idade, ela é removida quando prova estar morta de verdade (404
+    confirmado, warmup validando via HEAD/GET). TTL por tempo é achismo: uma
+    URL travada bloqueava a reinserção do mesmo hash quando 'expirava' mas
+    ainda funcionava de verdade (ver bug reportado — dedup via hash ignorava
+    o TTL e nunca re-adicionava, deixando o pool visivelmente vazio pra sempre)."""
+    return list(_CACHE.get(player_url, []))
 
 
 def _latest_valid(player_url: str) -> tuple[float, dict] | None:
@@ -347,14 +352,21 @@ def _accumulate_bg(player_url: str):
             else:
                 now = time.time()
                 new_hash = _channel_hash(new_entry["url"])
-                existing_hashes = {_channel_hash(e.get("url", "")) for _, e in _CACHE.get(player_url, [])}
-                if new_hash and new_hash not in existing_hashes:
-                    _CACHE.setdefault(player_url, []).append((now, new_entry))
+                pool = _CACHE.setdefault(player_url, [])
+                existing_idx = next(
+                    (i for i, (_, e) in enumerate(pool) if _channel_hash(e.get("url", "")) == new_hash),
+                    None,
+                ) if new_hash else None
+                if existing_idx is None:
+                    pool.append((now, new_entry))
                     _log(f"[scraper] hash novo adicionado ao pool (total: {pool_size(player_url)}): {player_url}")
-                    threading.Thread(target=_save_cache, daemon=True).start()
-                    threading.Thread(target=_append_stream_log, args=(player_url, new_entry), daemon=True).start()
                 else:
-                    _log(f"[scraper] hash duplicado, não adicionado ao pool: {player_url}")
+                    # mesmo hash já presente — atualiza timestamp/entry em vez de
+                    # ignorar (o resolve confirmou que ainda está vivo agora)
+                    pool[existing_idx] = (now, new_entry)
+                    _log(f"[scraper] hash já presente, timestamp atualizado: {player_url}")
+                threading.Thread(target=_save_cache, daemon=True).start()
+                threading.Thread(target=_append_stream_log, args=(player_url, new_entry), daemon=True).start()
     finally:
         lock.release()
 

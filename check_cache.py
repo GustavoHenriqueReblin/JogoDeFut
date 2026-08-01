@@ -16,7 +16,7 @@ STREAM_LOG = BASE_DIR / "stream_log.txt"
 CACHE_FILE = BASE_DIR / "cache.json"
 
 sys.path.insert(0, str(BASE_DIR))
-from scraper import check_stream, _channel_hash, _CACHE_TTL
+from scraper import check_stream, _channel_hash
 
 
 # ── parsers ───────────────────────────────────────────────────────────────────
