@@ -806,7 +806,7 @@ def _warmup_pass(channels: list, label: str) -> list:
     channels = list(channels)
     random.shuffle(channels)
     total = len(channels)
-    _log(f"[warmup] {label}: {total} canais ({_WARMUP_WORKERS} workers)...")
+    print(f"[warmup] {label}: {total} canais ({_WARMUP_WORKERS} workers)...", flush=True)
 
     wfc: dict[int, int] = {}   # thread ident → contagem de falhas consecutivas
     wfc_lock = threading.Lock()
@@ -869,20 +869,21 @@ _WARMUP_RETRY_DELAY = 600  # 10 minutos
 
 
 def _warmup_all_channels():
+    print(f"[warmup] execução agendada disparada ({len(_parse_channels())} canais)", flush=True)
     channels = _parse_channels()
     failed = _warmup_pass(channels, "passe 1")
 
     if failed:
-        _log(f"[warmup] {len(failed)} canal(is) falharam. Aguardando {_WARMUP_RETRY_DELAY}s para segundo passe...")
+        print(f"[warmup] {len(failed)} canal(is) falharam. Aguardando {_WARMUP_RETRY_DELAY}s para segundo passe...", flush=True)
         time.sleep(_WARMUP_RETRY_DELAY)
         still_failed = _warmup_pass(failed, "passe 2")
         if still_failed:
             names = ", ".join(ch["name"] for ch in still_failed)
-            _log(f"[warmup] concluído com falhas: {names}")
+            print(f"[warmup] concluído com falhas: {names}", flush=True)
         else:
-            _log("[warmup] concluído — todos resolvidos no passe 2.")
+            print("[warmup] concluído — todos resolvidos no passe 2.", flush=True)
     else:
-        _log("[warmup] concluído — todos resolvidos no passe 1.")
+        print("[warmup] concluído — todos resolvidos no passe 1.", flush=True)
 
 
 def _midnight_restart():
@@ -912,9 +913,9 @@ def _start_scheduler():
         scheduler.add_job(_warmup_all_channels, CronTrigger(hour=5,  minute=0, timezone=tz), id="warmup_5h")
         scheduler.add_job(_warmup_all_channels, CronTrigger(hour=12, minute=0, timezone=tz), id="warmup_12h")
         scheduler.add_job(_warmup_all_channels, CronTrigger(hour=18, minute=0, timezone=tz), id="warmup_18h")
-        _log(f"[scheduler] agendamentos ativos: warmup 05h, 12h, 18h | restart 04h: {'ativo' if _RESTART_ENABLED else 'DESATIVADO'} (America/Sao_Paulo)")
+        print(f"[scheduler] agendamentos ativos: warmup 05h, 12h, 18h | restart 04h: {'ativo' if _RESTART_ENABLED else 'DESATIVADO'} (America/Sao_Paulo)", flush=True)
     else:
-        _log(f"[scheduler] warmup desativado (WARMUP_ENABLED=false) | restart 04h: {'ativo' if _RESTART_ENABLED else 'DESATIVADO'} (America/Sao_Paulo)")
+        print(f"[scheduler] warmup desativado (WARMUP_ENABLED=false) | restart 04h: {'ativo' if _RESTART_ENABLED else 'DESATIVADO'} (America/Sao_Paulo)", flush=True)
 
     if _RESTART_ENABLED:
         scheduler.add_job(_midnight_restart, CronTrigger(hour=4, minute=0, timezone=tz), id="restart_4h")
