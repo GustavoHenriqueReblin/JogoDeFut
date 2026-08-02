@@ -336,37 +336,41 @@ def _channel_hash(stream_url: str) -> str | None:
     return matches[-1] if matches else None
 
 
-def _accumulate_bg(player_url: str):
-    """Tenta acumular mais uma URL no pool em background (sem bloquear o caller)."""
+def _accumulate_bg(player_url: str) -> bool:
+    """Tenta acumular mais uma URL no pool (bloqueia o caller até terminar —
+    quem quiser fire-and-forget deve rodar isso numa thread própria).
+    Retorna True se o pool já estava completo ou ganhou/renovou uma entry viva."""
     lock = _get_lock(player_url)
     if not lock.acquire(blocking=True, timeout=90):
-        return
+        return False
     try:
         current_pool = _valid_pool(player_url)
         if len(current_pool) >= _MIN_POOL_SIZE:
-            return
+            return True
         new_entry = _do_resolve(player_url)
-        if new_entry:
-            if not is_stream_alive(new_entry["url"]):
-                _log(f"[scraper] URL resolvida não passou na validação (P2P/M3U8), descartando: {player_url}")
-            else:
-                now = time.time()
-                new_hash = _channel_hash(new_entry["url"])
-                pool = _CACHE.setdefault(player_url, [])
-                existing_idx = next(
-                    (i for i, (_, e) in enumerate(pool) if _channel_hash(e.get("url", "")) == new_hash),
-                    None,
-                ) if new_hash else None
-                if existing_idx is None:
-                    pool.append((now, new_entry))
-                    _log(f"[scraper] hash novo adicionado ao pool (total: {pool_size(player_url)}): {player_url}")
-                else:
-                    # mesmo hash já presente — atualiza timestamp/entry em vez de
-                    # ignorar (o resolve confirmou que ainda está vivo agora)
-                    pool[existing_idx] = (now, new_entry)
-                    _log(f"[scraper] hash já presente, timestamp atualizado: {player_url}")
-                threading.Thread(target=_save_cache, daemon=True).start()
-                threading.Thread(target=_append_stream_log, args=(player_url, new_entry), daemon=True).start()
+        if not new_entry:
+            return False
+        if not is_stream_alive(new_entry["url"]):
+            _log(f"[scraper] URL resolvida não passou na validação (P2P/M3U8), descartando: {player_url}")
+            return False
+        now = time.time()
+        new_hash = _channel_hash(new_entry["url"])
+        pool = _CACHE.setdefault(player_url, [])
+        existing_idx = next(
+            (i for i, (_, e) in enumerate(pool) if _channel_hash(e.get("url", "")) == new_hash),
+            None,
+        ) if new_hash else None
+        if existing_idx is None:
+            pool.append((now, new_entry))
+            _log(f"[scraper] hash novo adicionado ao pool (total: {pool_size(player_url)}): {player_url}")
+        else:
+            # mesmo hash já presente — atualiza timestamp/entry em vez de
+            # ignorar (o resolve confirmou que ainda está vivo agora)
+            pool[existing_idx] = (now, new_entry)
+            _log(f"[scraper] hash já presente, timestamp atualizado: {player_url}")
+        threading.Thread(target=_save_cache, daemon=True).start()
+        threading.Thread(target=_append_stream_log, args=(player_url, new_entry), daemon=True).start()
+        return True
     finally:
         lock.release()
 
@@ -422,8 +426,10 @@ def _do_resolve(player_url: str) -> dict | None:
             _log(f"[scraper] usando URL capturada direto do browser (sem replay via requests): {direct_url}")
             return {"url": direct_url, "referer": player_url}
         if not token:
-            _log(f"[scraper] FALHA na tentativa {attempt+1}: sem token")
-            return None
+            delay = _RETRY_DELAYS[min(attempt, len(_RETRY_DELAYS) - 1)]
+            _log(f"[scraper] FALHA na tentativa {attempt+1}: sem token, aguardando {delay}s... ({attempt+1}/{_MAX_ATTEMPTS})")
+            time.sleep(delay)
+            continue
         try:
             _log(f"[scraper] POST get_token (tentativa {attempt+1})...")
             r = _http.post(

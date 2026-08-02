@@ -16,7 +16,7 @@ import requests as http_req
 
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from scraper import (
-    resolve_stream, _latest_valid, _evict_cache, _evict_url,
+    resolve_stream, _latest_valid, _evict_cache, _evict_url, _accumulate_bg,
     get_stream_pool, pool_size, _log, _MIN_POOL_SIZE,
     is_stream_alive, is_stream_definitely_dead, _channel_hash,
 )
@@ -762,7 +762,7 @@ def cache_status():
   .summary{{margin-bottom:16px;color:#aaa}}
 </style></head><body>
 <h2>Cache dos Canais</h2>
-<p class="summary">{ok}/{len(rows)} com cache válido &nbsp;·&nbsp; TTL 48h &nbsp;·&nbsp; pool mín. {_MIN_POOL_SIZE} URLs</p>
+<p class="summary">{ok}/{len(rows)} com cache válido &nbsp;·&nbsp; sem TTL, validade por teste real &nbsp;·&nbsp; pool mín. {_MIN_POOL_SIZE} URLs</p>
 <table>{html_rows}</table>
 </body></html>""", 200, {"Content-Type": "text/html"}
 
@@ -839,7 +839,12 @@ def _warmup_pass(channels: list, label: str) -> list:
         _log(f"[warmup] {label} [{i}/{total}] resolvendo '{ch['name']}'...")
         ok = False
         try:
-            ok = bool(resolve_stream(ch["url"]).get("streams"))
+            # chama _accumulate_bg direto (bloqueante) em vez de resolve_stream:
+            # resolve_stream, com pool parcial, retorna na hora e dispara a
+            # acumulação numa thread solta — isso ignorava o limite de
+            # WARMUP_WORKERS por completo, deixando até 1 Chromium por canal
+            # rodando ao mesmo tempo em vez de respeitar o pool de workers.
+            ok = _accumulate_bg(ch["url"])
         except Exception as e:
             _log(f"[warmup] {label} [{i}/{total}] '{ch['name']}': erro - {e}")
 

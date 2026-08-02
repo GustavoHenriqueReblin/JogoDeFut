@@ -97,13 +97,16 @@ app.py (Flask)
 O scraping é necessário porque os players ficam atrás de Cloudflare Turnstile.
 
 **Fluxo:**
-1. `resolve_stream(player_url)` — verifica pool (TTL 48h). Pool completo → retorna imediatamente. Pool parcial → retorna o que tem e dispara acumulação em background (não bloqueia). Pool vazio → bloqueia até resolver. Só invoca Chromium se `pool_size < MIN_POOL_SIZE`
-2. `_do_resolve()` — extrai `host` e `channel` da URL, consulta `CLOUDFLAIRE_PLAYERS` para saber a `fonte`
-3. Chama `_scrape_token()` até 8 vezes com delays progressivos `[3,5,8,10,12,15,20]`s após 404
-4. `_scrape_token()` abre Chromium via Playwright (patchright), navega até a URL e:
+1. `resolve_stream(player_url)` — verifica pool. Pool completo → retorna imediatamente. Pool parcial → retorna o que tem e dispara `_accumulate_bg` numa thread solta, fire-and-forget (não bloqueia o caller). Pool vazio → bloqueia até resolver (`_accumulate_bg` direto). Só invoca Chromium se `pool_size < MIN_POOL_SIZE`
+2. `_accumulate_bg(player_url)` — bloqueia até terminar; chama `_do_resolve`, valida (`is_stream_alive`) e insere/atualiza a entry no pool. Retorna `bool` (sucesso). **Importante:** quem precisa de concorrência controlada (ex: warmup) deve chamar `_accumulate_bg` diretamente, nunca `resolve_stream` — pool parcial faz `resolve_stream` retornar na hora e a thread solta que ele dispara não é contada em nenhum limite de workers (ver bug do warmup abaixo).
+3. `_do_resolve()` — extrai `host` e `channel` da URL, consulta `CLOUDFLAIRE_PLAYERS` para saber a `fonte`
+4. Chama `_scrape_token()` até 8 vezes com delays progressivos `[3,5,8,10,12,15,20]`s após 404 **ou falha total de token/direct_url** (ver bug corrigido abaixo)
+5. `_scrape_token()` abre Chromium via Playwright (patchright), navega até a URL e:
    - **Prioridade (até ~15s) — interceptação da chamada `get_token` que o próprio site faz:** o player da página, ao carregar, resolve o Turnstile e chama a API de token sozinho, dentro do browser (com fingerprint de TLS real, cookies corretos etc.). O scraper intercepta essa response e extrai a `url` direto dali, sem precisar montar seu próprio request — **esse é o caminho confiável**, porque evita replay externo do token.
    - **Fallback (mais ~15s), só se o site não resolver sozinho:** simula interação humana (mouse/scroll) e tenta capturar um token via DOM (`[name="cf-turnstile-response"]`) ou response do próprio Turnstile, para então fazer o `POST` manual via `requests`. Esse caminho é frágil: o Cloudflare consegue diferenciar o fingerprint TLS/HTTP de um cliente Python do de um Chrome real, então mesmo com token tecnicamente válido a API pode rejeitar (404) um POST feito fora do contexto do browser. Exige tamanho mínimo de token (`_MIN_TOKEN_LEN`) consistente com challenges de alta confiança — tokens curtos são sistematicamente rejeitados pela API mesmo passando na validação de formato.
-5. Retorna `{"url": "<hls_url>", "referer": player_url}` — entry adicionada ao pool do canal
+6. Retorna `{"url": "<hls_url>", "referer": player_url}` — entry adicionada ao pool do canal
+
+> **Bug corrigido — sem retry em falha total de token:** o loop de `_do_resolve` retryava com backoff só em 404 da API; se `_scrape_token` falhasse completamente (nem `direct_url` nem `token`, ex: Chromium sobrecarregado sob concorrência alta), o código desistia na primeira tentativa (`return None` direto), ignorando as 8 tentativas com backoff que existem pra exatamente esse cenário. Corrigido: agora aplica o mesmo backoff e `continue` do caso 404.
 
 **Detecção de automação:** mesmo com Playwright via patchright (anti-detecção), o Cloudflare pode identificar a sessão como automatizada e entregar tokens de confiança reduzida. Simular interação humana (mouse/scroll) pós-carregamento não altera esse resultado quando a decisão já é tomada no fingerprint do ambiente antes da interação — nesses casos, a captura direta da `url` (item 4 acima) é o único caminho que funciona de forma confiável.
 
@@ -168,6 +171,8 @@ Roda em background thread com timezone `America/Sao_Paulo`:
 | 18h00 | Warmup de todos os canais (se `WARMUP_ENABLED=true`) — cobre jogos sul-americanos (19h–23h) |
 
 O warmup em dev (`ENVIRONMENT != PRODUCTION`) dispara imediatamente ao subir. O app é iniciado diretamente com `python app.py` — sem systemd.
+
+> **Bug corrigido — `WARMUP_WORKERS` não era respeitado de verdade:** o warmup (`_resolve_one` em `app.py`) chamava `resolve_stream()` pra cada canal. Só que `resolve_stream`, quando o pool está **parcial** (o caso comum — quase todo canal fica em `N/MIN_POOL_SIZE` a maior parte do tempo), retorna **na hora** com o que já tem e dispara a acumulação de verdade numa thread solta, fire-and-forget, fora de qualquer controle. Resultado: o `ThreadPoolExecutor(max_workers=WARMUP_WORKERS)` do warmup via cada canal "concluir" quase instantaneamente (porque já tinha pool) e passava pro próximo, disparando **um Chromium por canal simultaneamente** — muito mais que o limite configurado — enquanto essas threads soltas rodavam por conta própria em paralelo. Isso sobrecarregava o scraping (visível em produção: vários canais falhando a captura de token ao mesmo tempo, tudo durante a janela em que os 15 canais foram todos disparados em ~25s). Corrigido: warmup agora chama `_accumulate_bg()` diretamente (bloqueante, retorna `bool`), então o pool de workers realmente limita quantos Chromium rodam ao mesmo tempo.
 
 **`check_stream(url)`** — função central de validação em `scraper.py` (tristate):
 - `'alive'` — M3U8 válido, live, P2P ok
