@@ -191,9 +191,23 @@ def pool_size(player_url: str) -> int:
     return len(_valid_pool(player_url))
 
 
+# Canais cuja fonte devolve sempre a mesma URL determinística (sem hash — ex:
+# nossoplayer passou a servir .../{canal}.txt fixo). Pra esses o pool nunca
+# chega a MIN_POOL_SIZE; sem essa marca cada acesso/warmup reabriria o
+# Chromium só pra achar a mesma URL de novo. Limpa quando o pool perde entries.
+_SATURATED: set[str] = set()
+
+
+def pool_is_full(player_url: str) -> bool:
+    """True se não adianta acumular mais: pool no mínimo, ou fonte saturada."""
+    size = pool_size(player_url)
+    return size >= _MIN_POOL_SIZE or (size > 0 and player_url in _SATURATED)
+
+
 def _evict_cache(player_url: str):
     """Remove todo o pool do canal (força re-resolve com Chromium)."""
     _CACHE.pop(player_url, None)
+    _SATURATED.discard(player_url)
     threading.Thread(target=_save_cache, daemon=True).start()
 
 
@@ -202,6 +216,7 @@ def _evict_url(player_url: str, stream_url: str):
     pool = _CACHE.get(player_url)
     if not pool:
         return
+    _SATURATED.discard(player_url)
     _CACHE[player_url] = [(ts, e) for ts, e in pool if e.get("url") != stream_url]
     if not _CACHE[player_url]:
         del _CACHE[player_url]
@@ -235,13 +250,21 @@ async def _simulate_human_interaction(page):
         _log(f"[scraper] erro ao simular interação: {ex}")
 
 
+# Playlists que o player carrega como "erro"/placeholder — nunca cachear.
+_PLAYLIST_IGNORE = ("live-chunks.mediacdn.net",)
+
+
 async def _scrape_token(page_url: str) -> tuple[str | None, str | None]:
     """Retorna (token, direct_url).
 
-    direct_url: capturado interceptando a própria chamada get_token que o site
-    faz sozinho dentro do browser — caminho confiável, evita replay externo do
-    token (fingerprint TLS/HTTP de `requests` é diferente de um Chrome real e
-    a API rejeita mesmo com token válido).
+    direct_url: capturado interceptando o que o próprio site carrega dentro do
+    browser — caminho confiável, evita replay externo do token (fingerprint
+    TLS/HTTP de `requests` é diferente de um Chrome real e a API rejeita mesmo
+    com token válido). Duas origens:
+      - resposta da chamada get_token (fluxo com Turnstile);
+      - a própria playlist HLS que o player baixa (.txt/.m3u8 com #EXTM3U) —
+        nossoplayer desativou o Turnstile (onSuccess faz `return;`) e passou a
+        carregar direto .../{canal}.txt, sem token.
 
     token: fallback só usado se o site não fizer a chamada sozinho (permite ao
     chamador tentar o replay manual via requests, mesmo sabendo que pode falhar)."""
@@ -251,6 +274,8 @@ async def _scrape_token(page_url: str) -> tuple[str | None, str | None]:
     def _make_interceptors(page):
         async def intercept_response(response):
             nonlocal token, direct_url
+            if direct_url:
+                return
             if "get_token" in response.url:
                 try:
                     body = await response.text()
@@ -260,6 +285,19 @@ async def _scrape_token(page_url: str) -> tuple[str | None, str | None]:
                         _log("[scraper] URL capturada direto da chamada get_token do próprio site")
                 except Exception:
                     pass
+                return
+            path = response.url.split("?")[0]
+            if path.endswith((".txt", ".m3u8")) and response.status == 200:
+                if any(h in response.url for h in _PLAYLIST_IGNORE):
+                    return
+                try:
+                    body = await response.text()
+                except Exception:
+                    return
+                # re-checa: o player pede a playlist 2x quase juntas e as duas
+                # respostas passam pelo guard do topo antes do await
+                if not direct_url and body.lstrip().startswith("#EXTM3U"):
+                    direct_url = response.url
                 return
             if token or "challenges.cloudflare.com" not in response.url:
                 return
@@ -336,6 +374,13 @@ def _channel_hash(stream_url: str) -> str | None:
     return matches[-1] if matches else None
 
 
+def _dedup_key(stream_url: str) -> tuple[str, bool]:
+    """Chave de dedup do pool: (chave, é_hash). Sem hash MD5 na URL (ex:
+    nossoplayer atual, .../{canal}.txt fixo) cai pra URL sem query."""
+    h = _channel_hash(stream_url)
+    return (h, True) if h else (stream_url.split("?")[0], False)
+
+
 def _accumulate_bg(player_url: str) -> bool:
     """Tenta acumular mais uma URL no pool (bloqueia o caller até terminar —
     quem quiser fire-and-forget deve rodar isso numa thread própria).
@@ -344,8 +389,7 @@ def _accumulate_bg(player_url: str) -> bool:
     if not lock.acquire(blocking=True, timeout=90):
         return False
     try:
-        current_pool = _valid_pool(player_url)
-        if len(current_pool) >= _MIN_POOL_SIZE:
+        if pool_is_full(player_url):
             return True
         new_entry = _do_resolve(player_url)
         if not new_entry:
@@ -354,12 +398,12 @@ def _accumulate_bg(player_url: str) -> bool:
             _log(f"[scraper] URL resolvida não passou na validação (P2P/M3U8), descartando: {player_url}")
             return False
         now = time.time()
-        new_hash = _channel_hash(new_entry["url"])
+        new_key, is_hash = _dedup_key(new_entry["url"])
         pool = _CACHE.setdefault(player_url, [])
         existing_idx = next(
-            (i for i, (_, e) in enumerate(pool) if _channel_hash(e.get("url", "")) == new_hash),
+            (i for i, (_, e) in enumerate(pool) if _dedup_key(e.get("url", ""))[0] == new_key),
             None,
-        ) if new_hash else None
+        )
         if existing_idx is None:
             pool.append((now, new_entry))
             _log(f"[scraper] hash novo adicionado ao pool (total: {pool_size(player_url)}): {player_url}")
@@ -368,6 +412,9 @@ def _accumulate_bg(player_url: str) -> bool:
             # ignorar (o resolve confirmou que ainda está vivo agora)
             pool[existing_idx] = (now, new_entry)
             _log(f"[scraper] hash já presente, timestamp atualizado: {player_url}")
+            if not is_hash:
+                # URL determinística repetiu — a fonte não tem outras pra dar
+                _SATURATED.add(player_url)
         threading.Thread(target=_save_cache, daemon=True).start()
         threading.Thread(target=_append_stream_log, args=(player_url, new_entry), daemon=True).start()
         return True
@@ -382,7 +429,7 @@ def resolve_stream(player_url: str) -> dict:
     """
     current_pool = _valid_pool(player_url)
 
-    if len(current_pool) >= _MIN_POOL_SIZE:
+    if pool_is_full(player_url):
         ages = [int(time.time() - ts) for ts, _ in current_pool]
         _log(f"[scraper] pool completo ({len(current_pool)} URLs, idades: {ages}s): {player_url}")
         return {"streams": [e for _, e in current_pool]}

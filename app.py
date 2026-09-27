@@ -17,7 +17,7 @@ import requests as http_req
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from scraper import (
     resolve_stream, _latest_valid, _evict_cache, _evict_url, _accumulate_bg,
-    get_stream_pool, pool_size, _log, _MIN_POOL_SIZE,
+    get_stream_pool, pool_size, pool_is_full, _log, _MIN_POOL_SIZE,
     is_stream_alive, is_stream_definitely_dead, _channel_hash,
 )
 
@@ -321,7 +321,7 @@ class StreamRelay:
     def _pick_source(self) -> dict | None:
         # pool abaixo do mínimo (mesmo que não vazio) — resolve_stream já dispara
         # acumulação em background nesse caso, dando mais opções pro próximo failover
-        if pool_size(self._channel_url) < _MIN_POOL_SIZE:
+        if not pool_is_full(self._channel_url):
             try:
                 pool = resolve_stream(self._channel_url).get("streams", [])
             except Exception:
@@ -726,13 +726,14 @@ def cache_status():
             # não expira mais por TTL — mostra há quanto tempo foi resolvido/
             # renovado pela última vez, informativo, não indica invalidade
             age_str = _fmt_duration(now - entry[0])
-            rows.append({"name": ch["name"], "status": "ok", "age": age_str, "pool": sz})
+            rows.append({"name": ch["name"], "status": "ok", "age": age_str, "pool": sz,
+                         "full": pool_is_full(ch["url"])})
         else:
             rows.append({"name": ch["name"], "status": "miss", "age": None, "pool": 0})
 
     def _badge_class(r):
         if r["status"] != "ok": return "miss"
-        if r["pool"] >= _MIN_POOL_SIZE: return "ok"
+        if r["full"]: return "ok"
         return "warn"
 
     def _badge_text(r):
@@ -828,7 +829,7 @@ def _warmup_pass(channels: list, label: str) -> list:
                 _log(f"[warmup] {label} [{i}/{total}] '{ch['name']}': URL morta confirmada (3/3 falhas), removendo do pool")
                 _evict_url(ch["url"], s_url)
             alive_count = pool_size(ch["url"])
-            if alive_count >= _MIN_POOL_SIZE:
+            if pool_is_full(ch["url"]):
                 _log(f"[warmup] {label} [{i}/{total}] '{ch['name']}': pool completo ({alive_count} URLs), pulando")
                 with wfc_lock:
                     wfc[tid] = 0
