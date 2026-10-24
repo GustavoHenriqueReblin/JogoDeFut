@@ -192,7 +192,7 @@ def pool_size(player_url: str) -> int:
 
 
 # Canais cuja fonte devolve sempre a mesma URL determinística (sem hash — ex:
-# nossoplayer passou a servir .../{canal}.txt fixo). Pra esses o pool nunca
+# a fonte passou a servir .../{canal}.txt fixo). Pra esses o pool nunca
 # chega a MIN_POOL_SIZE; sem essa marca cada acesso/warmup reabriria o
 # Chromium só pra achar a mesma URL de novo. Limpa quando o pool perde entries.
 _SATURATED: set[str] = set()
@@ -263,7 +263,7 @@ async def _scrape_token(page_url: str) -> tuple[str | None, str | None]:
     com token válido). Duas origens:
       - resposta da chamada get_token (fluxo com Turnstile);
       - a própria playlist HLS que o player baixa (.txt/.m3u8 com #EXTM3U) —
-        nossoplayer desativou o Turnstile (onSuccess faz `return;`) e passou a
+        a fonte desativou o Turnstile (onSuccess faz `return;`) e passou a
         carregar direto .../{canal}.txt, sem token.
 
     token: fallback só usado se o site não fizer a chamada sozinho (permite ao
@@ -366,8 +366,8 @@ def _get_lock(key: str) -> threading.Lock:
 
 def _channel_hash(stream_url: str) -> str | None:
     """Extrai o hash do canal da stream URL — formato MD5 (32 hex chars),
-    independente do separador usado (ex: nossoplayer_{hash}/style.css ou
-    nossoplayer/{hash}/file.txt). O host do CDN também é um MD5 sequencial
+    independente do separador usado (ex: {fonte}_{hash}/style.css ou
+    {fonte}/{hash}/file.txt). O host do CDN também é um MD5 sequencial
     (ver README), então pega o ÚLTIMO match — o hash do canal sempre vem
     depois do host no path, nunca antes."""
     matches = re.findall(r"[a-f0-9]{32}", stream_url)
@@ -376,7 +376,7 @@ def _channel_hash(stream_url: str) -> str | None:
 
 def _dedup_key(stream_url: str) -> tuple[str, bool]:
     """Chave de dedup do pool: (chave, é_hash). Sem hash MD5 na URL (ex:
-    nossoplayer atual, .../{canal}.txt fixo) cai pra URL sem query."""
+    fonte atual, .../{canal}.txt fixo) cai pra URL sem query."""
     h = _channel_hash(stream_url)
     return (h, True) if h else (stream_url.split("?")[0], False)
 
@@ -448,6 +448,11 @@ def resolve_stream(player_url: str) -> dict:
 
 def _do_resolve(player_url: str) -> dict | None:
     """Executa o Chromium e chama a API. Retorna uma stream entry ou None."""
+    # URL já é a playlist (ex: .../{canal}.txt): sem browser
+    if re.search(r"\.(txt|m3u8)(\?|$)", player_url):
+        _log(f"[scraper] URL direta de playlist, sem browser: {player_url}")
+        return {"url": player_url, "referer": ""}
+
     host = re.search(r"https?://([^/]+)", player_url)
     host = host.group(1) if host else ""
     fonte = _CLOUDFLAIRE_PLAYERS.get(host)

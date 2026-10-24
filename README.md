@@ -56,8 +56,8 @@ app.py (Flask)
 
 | Variável | Obrigatória | Descrição |
 |---|---|---|
-| `CHANNELS` | Sim | Lista `Nome:URL,Nome:URL` dos canais. URL é a página do player do canal no site cloudflaire. |
-| `CLOUDFLAIRE_PLAYERS` | Sim | Mapeamento `host:fonte` — relaciona o domínio do player à fonte usada na API. Ex: `player.exemplo.com:globo` |
+| `CHANNELS` | Sim | Lista `Nome:URL,Nome:URL` dos canais. URL é a página do player do canal no site cloudflaire **ou** a playlist HLS direta do canal (`.../{canal}.txt` / `.m3u8`) — nesse caso o scraper usa a URL como está, sem Chromium nem token. |
+| `CLOUDFLAIRE_PLAYERS` | Sim | Mapeamento `host:fonte` — relaciona o domínio do player à fonte usada na API. Ex: `player.exemplo.com:globo`. Só é consultado para URLs de página de player; canais com URL de playlist direta não precisam estar mapeados aqui. |
 | `GAMES_API_URL` | Sim | URL do worker Cloudflare (`games-proxy`) que retorna os jogos ao vivo em JSON. O worker em si roda fora deste repo e busca os dados de uma API de jogos (domínio já mudou pra `api.reidoscanais.st`) — se `/games` parar de retornar dados, checar se o worker ainda aponta pro domínio certo, não é algo que se resolve aqui no `.env`. |
 | `TOKEN_API_URL` | **Sim** | URL do endpoint que troca o token do Turnstile pela URL do stream (`POST /get_token`). Sem default no código de propósito — esse domínio muda periodicamente (a API/CDN roda em domínios descartáveis que trocam quando um é banido) e não deve ficar hardcoded no source. Se o scraper começar a levar 403 de bloqueio de zona (página de erro do Cloudflare, não da API), é sinal de que o domínio mudou; atualizar aqui sem precisar mexer em código. |
 | `P2P_CDN_HOST` | **Sim** | Host usado pra identificar a linha do PNG de verificação P2P dentro do M3U8 (`check_stream`, ver seção de validação). Sem default no código de propósito, mesmo motivo do `TOKEN_API_URL`. Se esse host mudar, a validação de P2P para de detectar a linha e passa a considerar todo stream "sem P2P" como ok — ajustar aqui sem mexer em código. |
@@ -99,7 +99,7 @@ O scraping é necessário porque os players ficam atrás de Cloudflare Turnstile
 **Fluxo:**
 1. `resolve_stream(player_url)` — verifica pool. Pool completo → retorna imediatamente. Pool parcial → retorna o que tem e dispara `_accumulate_bg` numa thread solta, fire-and-forget (não bloqueia o caller). Pool vazio → bloqueia até resolver (`_accumulate_bg` direto). Só invoca Chromium se `pool_size < MIN_POOL_SIZE`
 2. `_accumulate_bg(player_url)` — bloqueia até terminar; chama `_do_resolve`, valida (`is_stream_alive`) e insere/atualiza a entry no pool. Retorna `bool` (sucesso). **Importante:** quem precisa de concorrência controlada (ex: warmup) deve chamar `_accumulate_bg` diretamente, nunca `resolve_stream` — pool parcial faz `resolve_stream` retornar na hora e a thread solta que ele dispara não é contada em nenhum limite de workers (ver bug do warmup abaixo).
-3. `_do_resolve()` — extrai `host` e `channel` da URL, consulta `CLOUDFLAIRE_PLAYERS` para saber a `fonte`
+3. `_do_resolve()` — se a URL do canal já é uma playlist (`.txt`/`.m3u8`), retorna `{"url": player_url, "referer": ""}` direto, sem browser (passos 4–5 não rodam). Senão extrai `host` e `channel` da URL e consulta `CLOUDFLAIRE_PLAYERS` para saber a `fonte`
 4. Chama `_scrape_token()` até 8 vezes com delays progressivos `[3,5,8,10,12,15,20]`s após 404 **ou falha total de token/direct_url** (ver bug corrigido abaixo)
 5. `_scrape_token()` abre Chromium via Playwright (patchright), navega até a URL e:
    - **Prioridade (até ~15s) — interceptação da chamada `get_token` que o próprio site faz:** o player da página, ao carregar, resolve o Turnstile e chama a API de token sozinho, dentro do browser (com fingerprint de TLS real, cookies corretos etc.). O scraper intercepta essa response e extrai a `url` direto dali, sem precisar montar seu próprio request — **esse é o caminho confiável**, porque evita replay externo do token.
@@ -155,7 +155,7 @@ O scraping é necessário porque os players ficam atrás de Cloudflare Turnstile
 
 **URLs de segmentos** são encriptadas com AES-256-GCM (biblioteca `cryptography`) antes de aparecer no M3U8. A chave é `PROXY_SECRET` (hex 64 chars = 256 bits). Sem essa chave fixada no `.env`, cada restart gera uma nova chave e sessões abertas recebem 400 ao tentar usar segmentos antigos.
 
-URLs de canais **não** são encriptadas — o frontend usa slugs plain text (ex: `/stream/premiere`, `/resolve/espn`). Os slugs são derivados do último segmento da URL de player configurada no `.env`.
+URLs de canais **não** são encriptadas — o frontend usa slugs plain text (ex: `/stream/premiere`, `/resolve/espn`). Os slugs são derivados do último segmento da URL configurada no `.env`, sem extensão `.txt`/`.m3u8` (`_ch_slug` em `app.py`). **Sempre** derivar o slug via `_ch_slug` — o relay montava o slug na mão pro broadcast do WebSocket; com URLs `.../espn.txt` o broadcast ia pra `espn.txt` enquanto o cliente escutava `espn`, e o player ficava preso em "Buscando stream…" sem nenhum log de erro.
 
 ---
 
@@ -427,7 +427,7 @@ O host CDN segue o padrão `MD5(str(n).zfill(4)) + ".<domínio>"` onde `n` é se
 
 **Descoberta crítica:** todos os hosts 0000–9999 estão ativos simultaneamente — são aliases para o mesmo backend. A "rotação" é só qual deles a API retorna em cada chamada. Se o backend cair, todos caem juntos.
 
-**Consequência:** qualquer `MD5(0–9999)` funciona como host. Não há necessidade de rastrear qual está "ativo". O identificador real de um stream é o `hash_canal` (`nossoplayer_{hash}`), não a URL completa — por isso o dedup do pool é feito por hash, não por URL.
+**Consequência:** qualquer `MD5(0–9999)` funciona como host. Não há necessidade de rastrear qual está "ativo". O identificador real de um stream é o `hash_canal` (`{fonte}_{hash}`), não a URL completa — por isso o dedup do pool é feito por hash, não por URL.
 
 #### Hash do canal — ainda requer Chromium (uma vez)
 
@@ -448,7 +448,7 @@ Os hashes conhecidos ficam em `cache.json` e `stream_log.txt`.
 **Solução — pool de URLs por canal (`scraper.py`):**
 - `_CACHE[player_url]` = `[(ts, stream_entry), ...]` — acumula, não substitui
 - `resolve_stream`: pool completo → serve; parcial → serve + acumula em background; vazio → bloqueia. Só invoca Chromium se `pool_size < MIN_POOL_SIZE` (configurável via `.env`, padrão 5)
-- **Dedup por `hash_canal`** — o CDN host é irrelevante (todos os hosts 0000–9999 são aliases do mesmo backend). `6252cf.../nossoplayer_abc` e `2b77fb.../nossoplayer_abc` são o mesmo hash; só hashes genuinamente novos acumulam no pool
+- **Dedup por `hash_canal`** — o CDN host é irrelevante (todos os hosts 0000–9999 são aliases do mesmo backend). `6252cf.../{fonte}_abc` e `2b77fb.../{fonte}_abc` são o mesmo hash; só hashes genuinamente novos acumulam no pool
 - `_evict_url` remove apenas a URL morta do pool
 - `_evict_cache` limpa o pool todo (só quando todas as URLs falham)
 - Warmup valida todas as URLs do pool via `is_stream_alive()`; remove mortas; só pula o canal se ainda `>= MIN_POOL_SIZE` vivas

@@ -102,7 +102,7 @@ def _parse_channels():
 
 
 def _ch_slug(channel_url: str) -> str:
-    return channel_url.rstrip("/").split("/")[-1]
+    return re.sub(r"\.(txt|m3u8)$", "", channel_url.rstrip("/").split("/")[-1])
 
 
 def _slug_to_channel_url(slug: str) -> str | None:
@@ -300,7 +300,7 @@ class StreamRelay:
         self.running = True
         threading.Thread(
             target=self._run, daemon=True,
-            name=f"relay-{self._channel_url.rstrip('/').split('/')[-1]}",
+            name=f"relay-{_ch_slug(self._channel_url)}",
         ).start()
 
     def stop(self):
@@ -434,7 +434,7 @@ class StreamRelay:
     def _broadcast(self) -> None:
         if not self._sync:
             return
-        slug = self._channel_url.rstrip('/').split('/')[-1]
+        slug = _ch_slug(self._channel_url)
         with _WS_CHANNELS_LOCK:
             entries = list(_WS_CHANNELS.get(slug, []))
 
@@ -461,7 +461,7 @@ class StreamRelay:
             if self._active is None or self._fail_count >= _RELAY_FAIL_MAX:
                 src = self._pick_source()
                 if src is None:
-                    _log(f"[relay] sem fonte para {self._channel_url.rstrip('/').split('/')[-1]}, aguardando 10s")
+                    _log(f"[relay] sem fonte para {_ch_slug(self._channel_url)}, aguardando 10s")
                     self._stop.wait(timeout=10)
                     continue
                 if self._active is None or src.get("url") != self._active.get("url"):
@@ -495,7 +495,7 @@ def _get_relay(channel_url: str) -> StreamRelay:
             relay = StreamRelay(channel_url)
             relay.start()
             _RELAYS[channel_url] = relay
-            _log(f"[relay] iniciado: {channel_url.rstrip('/').split('/')[-1]}")
+            _log(f"[relay] iniciado: {_ch_slug(channel_url)}")
         return relay
 
 
@@ -508,7 +508,7 @@ def _relay_cleanup_loop():
             for url in stale:
                 _RELAYS[url].stop()
                 del _RELAYS[url]
-                _log(f"[relay] cleanup idle: {url.rstrip('/').split('/')[-1]}")
+                _log(f"[relay] cleanup idle: {_ch_slug(url)}")
 
 
 def _client_ip() -> str:
