@@ -125,7 +125,12 @@ def _normalize(s: str) -> str:
 
 def _match_channel(provider: str, channel_list: list) -> dict | None:
     p = _normalize(provider)
-    candidates = [ch for ch in channel_list if p.startswith(_normalize(ch["name"]))]
+    # prefixo cobre variações regionais ("Globo BA" → Globo), mas não numeração:
+    # "Premiere 5" não pode cair em "Premiere" (canal diferente)
+    candidates = [
+        ch for ch in channel_list
+        if p.startswith(n := _normalize(ch["name"])) and not p[len(n):][:1].isdigit()
+    ]
     if candidates:
         return max(candidates, key=lambda ch: len(ch["name"]))
     return None
